@@ -72,6 +72,29 @@ def get_relative_pose(pose):
     relative_pose = np.concatenate([relative_trans, relative_quat], axis=1)
     return torch.from_numpy(relative_pose)
 
+def get_relative_pose_6d(pose):
+    if torch.is_tensor(pose):
+        pose = pose.detach().cpu().numpy()
+
+    rot = R.from_euler("xyz", pose[:, 3:6])
+    first_rot = R.from_euler(
+        "xyz",
+        np.tile(pose[:1, 3:6], (pose.shape[0], 1)),
+    )
+
+    trans = pose[:, :3]
+    relative_trans = trans - trans[0:1]
+
+    relative_rot = first_rot.inv() * rot
+    relative_euler = relative_rot.as_euler("xyz")
+
+    relative_pose = np.concatenate(
+        [relative_trans, relative_euler],
+        axis=1,
+    )
+
+    return torch.from_numpy(relative_pose)
+
 def get_left_gripper_data(grapper_effort):
     temp = grapper_effort.clone()
     positive_mask = grapper_effort > 0
@@ -247,21 +270,17 @@ class LatentLeRobotDataset(LeRobotDataset):
 
         return self._flatten_latent_dict(out)
 
-    def _action_post_process(self, action):
-        act_shift = 0
+    def _action_post_process(self, local_start_frame, local_end_frame, latent_frame_ids, action):
+        act_shift = int(latent_frame_ids[0] - local_start_frame)
         action = action[act_shift:]
-        if self.config.env_type == 'robotwin_tshape': ## TODO support get_relative_pose for other dataset, currently only support robotwin
+        if self.config.env_type == 'robotwin_tshape': ## TODO support get_relative_pose for other dataset, currently only support robotwin 
             left_action = get_relative_pose(action[:, :7])
             right_action = get_relative_pose(action[:, 8:15])
             action = np.concatenate([left_action, action[:, 7:8], right_action, action[:, 15:16]], axis=1)
-        elif self.config.env_type == 'teleavatar':
-            left_action = get_relative_pose(action[:, 48:55])
-            right_action = get_relative_pose(action[:, 55:62])
-            left_gripper_data = get_left_gripper_data(action[:, 39:40])
-            right_gripper_data  = get_right_gripper_data(action[:, 47:48])
-            action = np.concatenate([left_action, left_gripper_data, right_action, right_gripper_data], axis=1)
+        elif self.config.env_type == 'tennis_tshape':
+            action = get_relative_pose_6d(action[:, :7]).numpy()
         else:
-            action = action.numpy()
+            action = action
         return torch.from_numpy(action).float()
 
     def __getitem__(self, idx) -> dict:
@@ -273,15 +292,19 @@ class LatentLeRobotDataset(LeRobotDataset):
         local_start_frame = start_frame
         local_end_frame = end_frame
 
-        ori_data_dict = self._get_range_hf_data(start_frame, end_frame)
+        ori_data_dict = self._get_range_latent_data(start_frame, end_frame, episode_index)
 
+        latent_frame_ids = ori_data_dict[f"{self.used_video_keys[0]}.frame_ids"]
         start_frame = self._get_global_idx(episode_index, start_frame)
         end_frame = self._get_global_idx(episode_index, end_frame)
-        action = self._action_post_process(ori_data_dict['action'])
 
-        output = dict()
-        output["actions"] = action
-        return output
+        hf_data_frames = self._get_range_hf_data(start_frame, end_frame)
+        ori_data_dict.update(hf_data_frames)
+
+        out_dict = dict()
+        out_dict['actions'] = self._action_post_process(local_start_frame, local_end_frame, latent_frame_ids, ori_data_dict['action'])
+
+        return out_dict
 
     def random_crop_n_dim(self, out_dict):
         _, n_total, *_ = out_dict["latents"].shape
@@ -300,7 +323,7 @@ if __name__ == '__main__':
     from wan_va.configs import VA_CONFIGS
     from tqdm import tqdm
     dset = MultiLatentLeRobotDataset(
-        VA_CONFIGS['aloha_3dcmp_train'],
+        VA_CONFIGS['va_tennis_train'],
         num_init_worker=128
     )
     dloader = DataLoader(
@@ -320,6 +343,8 @@ if __name__ == '__main__':
     a_max = action_all.max(dim=0)[0]
     q01 = torch.quantile(action_all, 0.01, dim=0)
     q99 = torch.quantile(action_all, 0.99, dim=0)
+    q00 = torch.min(action_all, dim=0)
+    q100 = torch.max(action_all, dim=0)
 
     print("min", a_min - q01 / (q99-q01))
     print("max", a_max - q01 / (q99-q01))
@@ -327,3 +352,5 @@ if __name__ == '__main__':
     print("one max", (1 + 0 * a_max) - q01 / (q99-q01))
     print("q01:", q01)
     print("q99:", q99)
+    print("q00:", q00)
+    print("q100:", q100)

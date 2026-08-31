@@ -128,7 +128,7 @@ class VA_Server:
         )
         self.vggt_adapter.eval()
 
-        if self.env_type == 'robotwin_tshape' or self.env_type == 'aloha_tshape':
+        if 'tshape' in self.env_type:
             self.streaming_vae_half = WanVAEStreamingWrapper(self.vae)
 
     def _get_t5_prompt_embeds(
@@ -386,7 +386,7 @@ class VA_Server:
             return None
         videos = []
         for k_i, k in enumerate(self.job_config.obs_cam_keys):
-            if self.env_type == 'robotwin_tshape' or self.env_type == 'aloha_tshape':
+            if 'tshape' in self.env_type:
                 if k_i == 0:  # camera high
                     height_i, width_i = self.height, self.width
                 else:
@@ -403,7 +403,7 @@ class VA_Server:
                                             align_corners=False).unsqueeze(0)
             videos.append(history_video_k)
 
-        if self.env_type == 'robotwin_tshape' or self.env_type == 'aloha_tshape':
+        if 'tshape' in self.env_type:
             videos_high = videos[0] / 255.0 * 2.0 - 1.0
             videos_left_and_right = torch.cat(videos[1:],
                                               dim=0) / 255.0 * 2.0 - 1.0
@@ -494,7 +494,7 @@ class VA_Server:
         self.action_per_frame = self.job_config.action_per_frame
         self.height, self.width = self.job_config.height, self.job_config.width
 
-        if self.env_type == 'robotwin_tshape' or self.env_type == 'aloha_tshape':
+        if 'tshape' in self.env_type:
             self.latent_height, self.latent_width = (
                 (self.height // 16) * 3) // 2, self.width // 16
             self.streaming_vae_half.clear_cache()

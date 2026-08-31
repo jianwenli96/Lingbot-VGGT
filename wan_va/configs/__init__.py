@@ -15,6 +15,9 @@ from .va_aloha_3dcmp_train_cfg import va_aloha_3dcmp_train_cfg
 from .va_aloha_3dcmp_server import va_aloha_3dcmp_server_cfg
 from .va_aloha_generalization_train_cfg import va_aloha_generalization_train_cfg
 from .va_aloha_generalization_server import va_aloha_generalization_server_cfg
+from .va_tennis_cfg import va_tennis_cfg
+from .va_tennis_i2va import va_tennis_i2va_cfg
+from .va_tennis_train_cfg import va_tennis_train_cfg
 
 VA_CONFIGS = {
     'robotwin': va_robotwin_cfg,
@@ -32,5 +35,8 @@ VA_CONFIGS = {
     'aloha_3dcmp_train': va_aloha_3dcmp_train_cfg,
     'aloha_3dcmp_server': va_aloha_3dcmp_server_cfg,
     'aloha_generalization_train': va_aloha_generalization_train_cfg,
-    'aloha_generalization_server': va_aloha_generalization_server_cfg
+    'aloha_generalization_server': va_aloha_generalization_server_cfg,
+    'tennis_cfg': va_tennis_cfg,
+    'tennis_i2va': va_tennis_i2va_cfg,
+    'tennis_train': va_tennis_train_cfg
 }

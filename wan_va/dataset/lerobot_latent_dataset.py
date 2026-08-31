@@ -77,6 +77,29 @@ def get_relative_pose(pose):
     relative_pose = np.concatenate([relative_trans, relative_quat], axis=1)
     return torch.from_numpy(relative_pose)
 
+def get_relative_pose_6d(pose):
+    if torch.is_tensor(pose):
+        pose = pose.detach().cpu().numpy()
+
+    rot = R.from_euler("xyz", pose[:, 3:6])
+    first_rot = R.from_euler(
+        "xyz",
+        np.tile(pose[:1, 3:6], (pose.shape[0], 1)),
+    )
+
+    trans = pose[:, :3]
+    relative_trans = trans - trans[0:1]
+
+    relative_rot = first_rot.inv() * rot
+    relative_euler = relative_rot.as_euler("xyz")
+
+    relative_pose = np.concatenate(
+        [relative_trans, relative_euler],
+        axis=1,
+    )
+
+    return torch.from_numpy(relative_pose)
+
 class MultiLatentLeRobotDataset(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -269,7 +292,7 @@ class LatentLeRobotDataset(LeRobotDataset):
                                  h=latent_height, 
                                  w=latent_width)
             latent_lst.append(latent)
-        if self.config.env_type == 'robotwin_tshape' or self.config.env_type == 'aloha_tshape':
+        if 'tshape' in self.config.env_type:
             wrist_latent = torch.cat(latent_lst[1:], dim=2)
             cat_latent = torch.cat([wrist_latent, latent_lst[0]], dim=1)
         else:
@@ -319,6 +342,8 @@ class LatentLeRobotDataset(LeRobotDataset):
             action = np.concatenate([left_action, action[:, 7:8], right_action, action[:, 15:16]], axis=1)
         elif self.config.env_type == 'aloha_tshape':
             action = action[..., :28]
+        elif self.config.env_type == 'tennis_tshape':
+            action = get_relative_pose_6d(action[:, :7])
         action = np.pad(action, pad_width=((frame_stride * 4, 0), (0, 0)), mode='constant', constant_values=0)
 
         latent_frame_num = (len(latent_frame_ids) - 1) // 4 + 1

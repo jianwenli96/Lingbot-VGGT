@@ -25,6 +25,7 @@ from tqdm import tqdm
 
 # Add Wan2.2 to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Import from Wan2.2 utils
 from modules.utils import load_vae, load_text_encoder, load_tokenizer
@@ -393,12 +394,20 @@ def get_target_resolution(video_key: str, base_height: int, base_width: int, env
     Returns:
         tuple: (height, width) target resolution
     """
+
     if env_type == 'robotwin_tshape':
-        # Check if this is a wrist camera
-        is_wrist = any(wrist_key in video_key for wrist_key in ['left_wrist', 'right_wrist'])
-        if is_wrist:
-            # Use half resolution for wrist cameras
-            return base_height // 2, base_width // 2
+        wrist_list = ['left_wrist', 'right_wrist']
+    elif env_type == 'tennis_tshape':
+        wrist_list = ['side_cam', 'wrist_cam']
+    else:
+        wrist_list = []
+    
+    # Check if this is a wrist camera
+    is_wrist = any(wrist_key in video_key for wrist_key in wrist_list)
+    if is_wrist:
+        print(f"Found {video_key} and set half target resolution.")
+        # Use half resolution for wrist cameras
+        return base_height // 2, base_width // 2
 
     # Default: use base resolution
     return base_height, base_width
