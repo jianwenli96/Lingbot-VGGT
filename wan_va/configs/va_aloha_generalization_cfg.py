@@ -6,7 +6,7 @@ from .shared_config import va_shared_cfg
 va_aloha_generalization_cfg = EasyDict(__name__='Config: VA generalization')
 va_aloha_generalization_cfg.update(va_shared_cfg)
 
-va_aloha_generalization_cfg.wan22_pretrained_model_name_or_path = '/mi/data2T/Embodied-AI/ckpts/lingbot-vggt-base'
+va_aloha_generalization_cfg.wan22_pretrained_model_name_or_path = '/efs-gy1/lijianwen/Pretrained_models/lingbot-va/lingbot-vggt-base'
 
 va_aloha_generalization_cfg.attn_window = 30
 va_aloha_generalization_cfg.frame_chunk_size = 2
@@ -70,7 +70,7 @@ va_aloha_generalization_cfg.norm_stat = {
 }
 
 # VGGTOmega config. Keep these values aligned with the training config and
-va_aloha_generalization_cfg.vggt_pretrained_model_name_or_path = "/mi/data2T/Embodied-AI/ckpts/VGGT-Omega/vggt_omega_1b_512.pt"
+va_aloha_generalization_cfg.vggt_pretrained_model_name_or_path = "/efs-gy1/lijianwen/Pretrained_models/VGGT/VGGT-Omega/vggt_omega_1b_512.pt"
 va_aloha_generalization_cfg.vggt_image_size = 512
 va_aloha_generalization_cfg.vggt_latent_frame_mode = "concat"
 va_aloha_generalization_cfg.vggt_latent_dimension = 2048

@@ -416,10 +416,10 @@ def main():
     )
     parser.add_argument("--input-dir", type=str, help="Path to directory containing multiple datasets")
     parser.add_argument("--pretrained-model-path", type=str,
-                        default="/mi/data2T/Embodied-AI/ckpts/lingbot-vggt-base",
+                        default="/efs-gy1/lijianwen/Pretrained_models/lingbot-va/lingbot-vggt-base",
                         help="Path to pretrained model root directory (containing vae/, text_encoder/, tokenizer/)")
     parser.add_argument("--vggt-pretrained-model-path", type=str,
-                        default="/mi/data2T/Embodied-AI/ckpts/VGGT-Omega/vggt_omega_1b_512.pt",
+                        default="/efs-gy1/lijianwen/Pretrained_models/VGGT/VGGT-Omega/vggt_omega_1b_512.pt",
                         help="Path to VGGT-Omega checkpoint.")
     parser.add_argument("--fps", type=float, default=10, help="Target FPS")
     parser.add_argument("--height", type=int, default=256, help="Target height")

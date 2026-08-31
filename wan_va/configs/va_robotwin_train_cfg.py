@@ -6,7 +6,7 @@ import os
 va_robotwin_train_cfg = EasyDict(__name__='Config: VA robotwin train')
 va_robotwin_train_cfg.update(va_robotwin_cfg)
 
-va_robotwin_train_cfg.resume_from = '/mi/data2T/Embodied-AI/ckpts/lingbot-vggt-base'
+va_robotwin_train_cfg.resume_from = '/efs-gy1/lijianwen/Pretrained_models/lingbot-va/lingbot-vggt-base'
 
 va_robotwin_train_cfg.dataset_path = '/path/to/your/dataset'
 va_robotwin_train_cfg.empty_emb_path = os.path.join(va_robotwin_train_cfg.dataset_path, 'empty_emb.pt')

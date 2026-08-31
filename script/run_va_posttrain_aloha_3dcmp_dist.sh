@@ -3,14 +3,14 @@
 set -x
 umask 007
 
-NNODES="$MA_NUM_HOSTS"                # 总机器数 MA_NUM_HOSTS
-NODE_RANK="$VC_TASK_INDEX"            # 当前机器序号 VC_TASK_INDEX
+NNODES="$MA_NUM_HOSTS"              # 总机器数 MA_NUM_HOSTS
+NODE_RANK="$VC_TASK_INDEX"          # 当前机器序号 VC_TASK_INDEX
 MASTER_ADDR="${VC_WORKER_HOSTS%%,*}"  # 主节点(Rank 0)的内网IP
 
 NGPU="$MA_NUM_GPUS"
 MASTER_PORT=${MASTER_PORT:-"29501"}
 LOG_RANK=${LOG_RANK:-"0"}
-CONFIG_NAME=${CONFIG_NAME:-"robotwin_train"}
+CONFIG_NAME=${CONFIG_NAME:-"aloha_3dcmp_train"}
 
 overrides=""
 if [ $# -ne 0 ]; then
@@ -35,7 +35,7 @@ export HCCL_ASYNC_ERROR_HANDLING=0
 export ASCEND_HOME_PATH="/usr/local/Ascend/ascend-toolkit/latest"
 export LOG_TIME=$(date +"%Y%m%d_%H%M%S")
 
-# 到当前文件目录的上一层（项目根目录）
+# 到当前文件目录
 cd "$(dirname "$0")/.." || exit
 
 /efs-gy1/apps/miniconda3/envs/lingbot-va/bin/python -m torch.distributed.run \
