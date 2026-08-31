@@ -8,7 +8,7 @@ va_tennis_cfg.update(va_shared_cfg)
 
 va_tennis_cfg.wan22_pretrained_model_name_or_path = '/efs-gy1/lijianwen/Pretrained_models/lingbot-va/lingbot-vggt-base'
 
-va_tennis_cfg.attn_window = 72
+va_tennis_cfg.attn_window = 36
 va_tennis_cfg.frame_chunk_size = 2
 va_tennis_cfg.env_type = 'tennis_tshape'
 

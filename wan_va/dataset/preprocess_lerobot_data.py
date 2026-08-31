@@ -430,7 +430,7 @@ def main():
     parser.add_argument("--vggt-pretrained-model-path", type=str,
                         default="/efs-gy1/lijianwen/Pretrained_models/VGGT/VGGT-Omega/vggt_omega_1b_512.pt",
                         help="Path to VGGT-Omega checkpoint.")
-    parser.add_argument("--fps", type=float, default=10, help="Target FPS")
+    parser.add_argument("--fps", type=float, default=15, help="Target FPS")
     parser.add_argument("--height", type=int, default=256, help="Target height")
     parser.add_argument("--width", type=int, default=320, help="Target width")
     parser.add_argument("--env-type", type=str, default=None,
