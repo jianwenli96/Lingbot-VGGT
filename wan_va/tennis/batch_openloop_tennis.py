@@ -1,7 +1,7 @@
 """Batch inference on entire validation set and compute average Euclidean distance.
 
 Example:
-    python -m wan_va.batch_inference_val \
+    python -m wan_va.tennis.batch_openloop_tennis \
         --config-name demo_i2av \
         --dataset-root /data/my_lerobot_dataset \
         --output-dir outputs/batch_val_results
@@ -14,6 +14,7 @@ import copy
 import json
 import math
 import os
+import sys
 from pathlib import Path
 from typing import NamedTuple
 
@@ -23,8 +24,11 @@ from diffusers.utils import export_to_video
 from diffusers.video_processor import VideoProcessor
 from tqdm import tqdm
 
-from .configs import VA_CONFIGS
-from .inference_video_prefix import (
+sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from configs import VA_CONFIGS
+from openloop_inference_tennis import (
     VideoPrefixInference,
     load_lerobot_episode,
     load_lerobot_actions,
@@ -32,7 +36,7 @@ from .inference_video_prefix import (
     make_uniform_timestamps,
     build_action_prefix,
 )
-from .utils import init_logger, logger
+from ..utils import init_logger, logger
 
 
 class EpisodeMetrics(NamedTuple):

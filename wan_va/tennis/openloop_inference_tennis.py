@@ -7,7 +7,7 @@ video/VGGT and action KV caches, and continues LingBot-VGGT's rollout from the
 last observed video/VGGT/action block.
 
 Example:
-    python -m wan_va.inference_video_prefix \
+    python -m wan_va.tennis.openloop_inference_tennis \
         --config-name robotwin_i2av \
         --dataset-root /data/my_lerobot_dataset \
         --episode-index 0 \
@@ -50,10 +50,13 @@ from diffusers.video_processor import VideoProcessor
 from einops import rearrange
 from tqdm import tqdm
 
-from .configs import VA_CONFIGS
-from .modules.utils import load_vae
-from .utils import data_seq_to_patch, init_logger, logger
-from .wan_va_server import VA_Server
+sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from configs import VA_CONFIGS
+from modules.utils import load_vae
+from utils import data_seq_to_patch, init_logger, logger
+from wan_va_server import VA_Server
 
 
 def make_uniform_timestamps(

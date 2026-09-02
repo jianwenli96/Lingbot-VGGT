@@ -2,15 +2,15 @@
 # Batch inference on validation set and compute average Euclidean distance
 #
 # Usage:
-#   bash script/run_batch_inference_val.sh              # Process all episodes
-#   bash script/run_batch_inference_val.sh 0:10         # Process episodes 0-9
-#   bash script/run_batch_inference_val.sh 50:100       # Process episodes 50-99
+#   bash script/run_batch_openloop_tennis.sh              # Process all episodes
+#   bash script/run_batch_openloop_tennis.sh 0:10         # Process episodes 0-9
+#   bash script/run_batch_openloop_tennis.sh 50:100       # Process episodes 50-99
 
 EPISODE_RANGE=${1:-}
 
-CMD="ASCEND_RT_VISIBLE_DEVICES=6 \
+CMD="ASCEND_RT_VISIBLE_DEVICES=4 \
 LINGBOT_USE_NPU=1 \
-python -m wan_va.batch_inference_val \
+python -m wan_va.tennis.openloop_inference_tennis \
     --config-name tennis_i2va \
     --model-path /efs-gy1/lijianwen/Pretrained_models/lingbot-va/lingbot-vggt-base \
     --transformer-path /efs-gy1/lijianwen/Codes/lingbot-vggt/train_out/va_tennis_tasks/20260825_154208/checkpoints/checkpoint_step_5000 \

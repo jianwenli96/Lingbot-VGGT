@@ -17,6 +17,7 @@ matplotlib
 ftfy
 safetensors
 Pillow
+pyzmq
 
 # Post-training
 lerobot==0.3.3

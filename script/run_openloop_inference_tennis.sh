@@ -1,6 +1,6 @@
 ASCEND_RT_VISIBLE_DEVICES=4 \
 LINGBOT_USE_NPU=1 \
-python -m wan_va.inference_video_prefix \
+python -m wan_va.tennis.openloop_inference_tennis \
     --config-name tennis_i2va \
     --model-path /efs-gy1/lijianwen/Pretrained_models/lingbot-va/lingbot-vggt-base \
     --transformer-path /efs-gy1/lijianwen/Codes/lingbot-vggt/train_out/va_tennis_tasks/20260825_154208/checkpoints/checkpoint_step_5000 \
