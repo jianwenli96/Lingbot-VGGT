@@ -4,6 +4,7 @@ set -euo pipefail
 
 # Launch the Isaac Sim tennis client. The VLA inference service should be
 # started separately with script/run_closeloop_server_tennis.sh.
+# Example: bash script/run_closeloop_isaacsim_tennis.sh --max_episodes 5 --max_steps 1000
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
@@ -20,6 +21,8 @@ THROW_INTERVAL="${THROW_INTERVAL:-3.0}"
 SEED="${SEED:-42}"
 PHYSICS_DT="${PHYSICS_DT:-0.0333333}"
 RENDER_DT="${RENDER_DT:-0.0333333}"
+MAX_EPISODES="${MAX_EPISODES:-100}"
+BALL_DIAMETER="${BALL_DIAMETER:-6.5}"
 
 if [[ ! -f "${ISAACSIM_SCRIPT}" ]]; then
     printf 'Isaac Sim entry point not found: %s\n' "${ISAACSIM_SCRIPT}" >&2
@@ -62,6 +65,8 @@ cmd=(
     --zmq_act_port "${ZMQ_ACT_PORT}"
     --save_video
     --video_dir "${SAVE_ROOT}"
+    --max_episodes "${MAX_EPISODES}"
+    --ball_diameter "${BALL_DIAMETER}"
     --clean_close
 )
 

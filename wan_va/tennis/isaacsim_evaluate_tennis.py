@@ -1,8 +1,7 @@
 """Minimal single-environment tennis scene — nothing attached.
 
 Scene identical to evaluate_tennis_0804_new.py (white room, table, Franka,
-tennis ball, 3 base cameras, lights). Ball is thrown randomly each episode.
-No VLA, no dataset collection, no catch logic, no markers.
+tennis ball, inference cameras, lights). Ball is thrown randomly each episode.
 
 Usage:
     source /home/jdhc/miniconda3/etc/profile.d/conda.sh && conda activate env_isaaclab
@@ -13,6 +12,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -34,12 +34,35 @@ def _parse_args():
     parser.add_argument("--object_dir", default="../objects", help="Object asset root.")
     parser.add_argument("--num_envs", type=int, default=1)
     parser.add_argument("--max_steps", type=int, default=0, help="0 = unlimited")
+    parser.add_argument(
+        "--max_episodes",
+        type=int,
+        default=100,
+        help="Maximum number of complete episodes to evaluate.",
+    )
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--physics_dt", type=float, default=1.0 / 30.0)
     parser.add_argument("--render_dt", type=float, default=1.0 / 30.0)
     parser.add_argument("--randomize_throw", action="store_true")
     parser.add_argument("--camera_width", type=int, default=480)
     parser.add_argument("--camera_height", type=int, default=360)
+    parser.add_argument(
+        "--camera_focal_length",
+        type=float,
+        default=2.3,
+        help="Focal length (cm) of the three inference cameras.",
+    )
+    parser.add_argument(
+        "--lerobot_video_crf",
+        type=int,
+        default=30,
+        help="SVT-AV1 CRF used to match the LeRobot dataset camera videos.",
+    )
+    parser.add_argument(
+        "--show_svt_logs",
+        action="store_true",
+        help="Show verbose SVT-AV1 encoder initialization logs.",
+    )
     parser.add_argument("--room_length", type=float, default=10.5)
     parser.add_argument("--room_width", type=float, default=6.0)
     parser.add_argument("--room_height", type=float, default=3.0)
@@ -47,11 +70,20 @@ def _parse_args():
     parser.add_argument("--table_length", type=float, default=1.20)
     parser.add_argument("--table_width", type=float, default=0.80)
     parser.add_argument("--robot_base_z_offset", type=float, default=0.005)
-    parser.add_argument("--ball_radius", type=float, default=0.0325)
     parser.add_argument("--ball_mass", type=float, default=0.058)
     parser.add_argument("--ball_start_distance", type=float, default=4.0)
     parser.add_argument("--ball_start_height", type=float, default=1.0)
+    parser.add_argument("--ball_horizontal_speed", type=float, default=4.0)
+    parser.add_argument("--ball_vertical_speed", type=float, default=4.0)
+    parser.add_argument("--ball_velocity_azimuth_deg", type=float, default=180.0,
+                        help="Horizontal throw direction in world XY (180° points toward the robot).")
     parser.add_argument("--clean_close", action="store_true")
+    parser.add_argument(
+        "--ball_diameter",
+        type=float,
+        default=6.5,
+        help="Tennis ball diameter in cm; supported assets: 6.5 or 24.",
+    )
     # VLA frame publishing via ZeroMQ (model runs separately in dy-vla env)
     parser.add_argument("--zmq_publish", action="store_true",
                         help="Publish 9 temporal RGB frames + EE pose over ZeroMQ PUB socket.")
@@ -74,6 +106,8 @@ def _parse_args():
                         help="Print EE pose every N steps when --print_ee is set.")
     parser.add_argument("--throw_interval", type=float, default=5.0,
                         help="Wait time (seconds) between ball throws.")
+    parser.add_argument("--catch_radius", type=float, default=0.13,
+                        help="Maximum ball-to-ring-center distance counted as a catch (m).")
     parser.add_argument("--save_video", "--save", action="store_true",
                         help="Save stitched 3-camera videos per episode (works with --viz none headless).")
     parser.add_argument("--video_dir", default="../output/vla_tennis_0813",
@@ -83,7 +117,15 @@ def _parse_args():
     parser.add_argument("--record_segmentation", action="store_true",
                         help="在保存的视频中加入实例分割掩码面板.")
     AppLauncher.add_app_launcher_args(parser)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.max_episodes <= 0:
+        parser.error("--max_episodes must be a positive integer")
+    if not 0 <= args.lerobot_video_crf <= 63:
+        parser.error("--lerobot_video_crf must be between 0 and 63")
+    if not any(np.isclose(args.ball_diameter, supported, atol=1e-6)
+               for supported in (6.5, 24.0)):
+        parser.error("--ball_diameter must be either 6.5 or 24 cm")
+    return args
 
 
 args_cli = _parse_args()
@@ -111,6 +153,14 @@ sys.path.insert(0, PROJECT_HOME)
 # observations sampled at 15 Hz.  Logical frame 0 is the first rendered frame
 # after the episode starts.
 VLA_OBSERVATION_STEPS = tuple(range(0, 17, 2))
+
+# Match the camera semantics and wire names used by
+# evaluate_tennis_0818_zab_ok.py and the tennis model config.
+VLA_CAMERAS = (
+    ("left_base_cam", "observation.images.opst_cam"),
+    ("right_base_cam", "observation.images.side_cam"),
+    ("low_angle_cam", "observation.images.wrist_cam"),
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -161,7 +211,34 @@ def _look_at_opengl_quat(camera_pos, target_pos):
     return _wxyz_from_xyzw(scipy.spatial.transform.Rotation.from_matrix(rot_mat).as_quat())
 
 
-def _camera_cfg(parent_path, pos, quat, convention, args):
+def _camera_cfg(
+    parent_path,
+    pos,
+    quat,
+    convention,
+    args,
+    local_y_deg=0.0,
+    focal_length=None,
+):
+    # Match the dataset cameras: rotate 90 degrees clockwise around the
+    # OpenGL optical axis so the wider FOV covers the vertical direction.
+    cw90_xyzw = np.array([0.0, 0.0, -0.70710678, 0.70710678])
+    quat_xyzw = np.array([quat[1], quat[2], quat[3], quat[0]])
+    local_y = scipy.spatial.transform.Rotation.from_euler(
+        "y", np.deg2rad(local_y_deg)
+    )
+    rotated = (
+        scipy.spatial.transform.Rotation.from_quat(quat_xyzw)
+        * local_y
+        * scipy.spatial.transform.Rotation.from_quat(cw90_xyzw)
+    )
+    quat_xyzw = rotated.as_quat()
+    quat_wxyz = [
+        float(quat_xyzw[3]),
+        float(quat_xyzw[0]),
+        float(quat_xyzw[1]),
+        float(quat_xyzw[2]),
+    ]
     data_types = ["rgb"]
     if args.record_depth:
         data_types.append("distance_to_image_plane")
@@ -175,20 +252,44 @@ def _camera_cfg(parent_path, pos, quat, convention, args):
         width=args.camera_width,
         data_types=data_types,
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=2.3,
+            focal_length=2.3 if focal_length is None else focal_length,
             focus_distance=400.0,
             horizontal_aperture=4.6,
             clipping_range=(0.01, 10000.0),
         ),
-        offset=CameraCfg.OffsetCfg(pos=pos, rot=quat, convention=convention),
+        offset=CameraCfg.OffsetCfg(pos=pos, rot=quat_wxyz, convention=convention),
     )
 
 
-def _ball_asset_path(object_dir):
-    path = os.path.join(_abs_path(object_dir), "tennis_ball", "green_yellow_tennis_ball.usd")
+def _ball_asset_path(object_dir, ball_diameter):
+    supported_assets = {
+        6.5: "green_yellow_tennis_ball.usd",
+        24.0: "green_yellow_tennis_ball_24cm.usd",
+    }
+    matched_diameter = next(
+        (
+            supported_diameter
+            for supported_diameter in supported_assets
+            if np.isclose(ball_diameter, supported_diameter, atol=1e-6)
+        ),
+        None,
+    )
+    if matched_diameter is None:
+        raise ValueError(
+            "Unsupported tennis ball diameter %.3f cm; supported values are %s"
+            % (ball_diameter, ", ".join(str(value) for value in supported_assets))
+        )
+    path = os.path.join(
+        _abs_path(object_dir), "tennis_ball", supported_assets[matched_diameter]
+    )
     if not os.path.exists(path):
         raise FileNotFoundError("Tennis ball USD not found: %s" % path)
     return path
+
+
+def _ball_radius_m(ball_diameter_cm):
+    """Convert a ball diameter in centimetres to its radius in metres."""
+    return float(ball_diameter_cm) / 200.0
 
 
 # ── Franka config (same as evaluate_tennis_0804_new.py) ───────────────────
@@ -265,9 +366,11 @@ class TennisSceneCfg(InteractiveSceneCfg):
     table_leg_br: AssetBaseCfg = MISSING
     robot: ArticulationCfg = MISSING
     tennis_ball: RigidObjectCfg = MISSING
-    center_base_cam: CameraCfg | None = None
     left_base_cam: CameraCfg | None = None
     right_base_cam: CameraCfg | None = None
+    low_angle_cam: CameraCfg | None = None
+    wrist_cam: CameraCfg | None = None
+    global_cam: CameraCfg | None = None
     dome_light: AssetBaseCfg = MISSING
     distant_light: AssetBaseCfg = MISSING
 
@@ -352,7 +455,7 @@ def make_scene_cfg(args):
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=_ball_asset_path(args.object_dir),
+            usd_path=_ball_asset_path(args.object_dir, args.ball_diameter),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 solver_position_iteration_count=16,
                 solver_velocity_iteration_count=2,
@@ -371,23 +474,57 @@ def make_scene_cfg(args):
     )
 
     if args.enable_cameras:
+        left_pos = [-0.3, 0.2, 1.0]
+        right_pos = [-0.3, -0.2, 1.0]
+        left_look_target = [2.0, 0.2, 1.0]
+        right_look_target = [2.0, -0.2, 1.0]
         cfg.left_base_cam = _camera_cfg(
             "/Robot/LeftBaseCamera",
-            [0.0, 0.25, 1.0],
-            (-0.695, 0.1288, 0.69528, -0.1288),  # xyzw
-            "opengl", args,
+            left_pos,
+            _look_at_opengl_quat(left_pos, left_look_target),
+            "opengl",
+            args,
+            focal_length=args.camera_focal_length,
         )
         cfg.right_base_cam = _camera_cfg(
             "/Robot/RightBaseCamera",
-            [0.0, -0.25, 1.0],
-            (-0.6837, -0.247, 0.629, 0.2755),  # xyzw
-            "opengl", args,
+            right_pos,
+            _look_at_opengl_quat(right_pos, right_look_target),
+            "opengl",
+            args,
+            focal_length=args.camera_focal_length,
         )
-        cfg.center_base_cam = _camera_cfg(
-            "/Robot/CenterBaseCamera",
-            (0.3, 0.0, 0.0),
-            (-0.798, 0.4469, 0.279, -0.293),  # xyzw
-            "opengl", args,
+        low_pos = [0.3, 0.0, 0.0]
+        low_look_target = [
+            low_pos[0] + 0.5,
+            0.0,
+            np.tan(np.deg2rad(40.0)) * 0.5,
+        ]
+        cfg.low_angle_cam = _camera_cfg(
+            "/Robot/LowAngleCamera",
+            low_pos,
+            _look_at_opengl_quat(low_pos, low_look_target),
+            "opengl",
+            args,
+            focal_length=args.camera_focal_length,
+        )
+        # Additional cameras from evaluate_tennis_0818_zab_ok.py.  The VLA
+        # wire format continues to use the three cameras in VLA_CAMERAS.
+        cfg.wrist_cam = _camera_cfg(
+            "/Robot/panda_hand/WristCamera",
+            [0.065, 0.0, 0.0],
+            [0.0, 0.7071068, 0.7071068, 0.0],
+            "opengl",
+            args,
+        )
+        global_pos = [-0.8, -0.8, 1.2]
+        global_look_target = [1.5, 0.5, 0.75]
+        cfg.global_cam = _camera_cfg(
+            "/Robot/GlobalCamera",
+            global_pos,
+            _look_at_opengl_quat(global_pos, global_look_target),
+            "opengl",
+            args,
         )
 
     cfg.dome_light = AssetBaseCfg(
@@ -415,30 +552,36 @@ def make_scene_cfg(args):
 
 # ── Ball throw ────────────────────────────────────────────────────────────
 def _sample_p2p_throw(rng, max_retries=200):
-    """Point-to-point throw: (pos_3d, vel_3d, landing_3d)."""
+    """Sample the reference point-to-point trajectory.
+
+    The launch point is sampled in a 0.5 m radius disc centred at (3, 0),
+    while the landing point is constrained to the robot's reachable forward
+    region.  The returned velocity makes the ball return to the launch height
+    after the sampled flight time.
+    """
     g = 9.81
-    z_fixed = rng.uniform(0.81, 1.0)
+    z_fixed = 0.805
     theta_lo = np.deg2rad(30.0)
     theta_hi = np.deg2rad(75.0)
 
     for _ in range(max_retries):
         angle_a = rng.uniform(0.0, 2.0 * np.pi)
-        radius_a = rng.uniform(0.0, 1.0)
-        a_x = 4.0 + radius_a * np.cos(angle_a)
+        radius_a = rng.uniform(0.0, 0.5)
+        a_x = 3.0 + radius_a * np.cos(angle_a)
         a_y = 0.0 + radius_a * np.sin(angle_a)
 
-        for _ in range(100):
-            angle_b = rng.uniform(0.0, 2.0 * np.pi)
-            radius_b = rng.uniform(0.0, 0.7)
-            b_x = radius_b * np.cos(angle_b)
-            b_y = radius_b * np.sin(angle_b)
-            if b_x >= 0.3:
-                break
-        else:
-            b_x = 0.3 + rng.uniform(0.0, 0.7)
-            b_y = 0.0
+        x_low_limit = 0.45
+        reach_max_ee = 0.75
+        radius_b = rng.uniform(x_low_limit, reach_max_ee)
+        max_angle = min(
+            np.arccos(x_low_limit / radius_b),
+            np.arcsin(0.4 / radius_b),
+        )
+        angle_b = rng.uniform(-max_angle, max_angle)
+        b_x = radius_b * np.cos(angle_b)
+        b_y = radius_b * np.sin(angle_b)
 
-        t_target = rng.uniform(1.2, 1.4)
+        t_target = rng.uniform(1.2, 1.5)
         dx = b_x - a_x
         dy = b_y - a_y
         d_xy = np.sqrt(dx * dx + dy * dy)
@@ -458,26 +601,58 @@ def _sample_p2p_throw(rng, max_retries=200):
         land = np.array([b_x, b_y, z_fixed], dtype=np.float64)
         return pos, vel, land
 
-    z_fb = 0.81
+    z_fb = 0.805
     t_target = 1.0
     v_xy = 3.5 / t_target
     v_z = 0.5 * g * t_target
-    pos = np.array([4.0, 0.0, z_fb], dtype=np.float64)
+    pos = np.array([3.0, 0.0, z_fb], dtype=np.float64)
     vel = np.array([-v_xy, 0.0, v_z], dtype=np.float64)
     land = np.array([0.5, 0.0, z_fb], dtype=np.float64)
     return pos, vel, land
 
 
+def _throw_params_per_env(args, rng):
+    """Return batched throw positions, velocities and landing points."""
+    positions = np.empty((args.num_envs, 3), dtype=np.float64)
+    velocities = np.empty((args.num_envs, 3), dtype=np.float64)
+    landings = np.empty((args.num_envs, 3), dtype=np.float64)
+    if args.randomize_throw:
+        for i in range(args.num_envs):
+            positions[i], velocities[i], landings[i] = _sample_p2p_throw(rng)
+        return positions, velocities, landings
+
+    yaw = np.deg2rad(args.ball_velocity_azimuth_deg)
+    positions[:] = [
+        -args.ball_start_distance * np.cos(yaw),
+        -args.ball_start_distance * np.sin(yaw),
+        args.ball_start_height,
+    ]
+    velocities[:] = [
+        args.ball_horizontal_speed * np.cos(yaw),
+        args.ball_horizontal_speed * np.sin(yaw),
+        args.ball_vertical_speed,
+    ]
+    landings[:] = positions + velocities * (2.0 * velocities[:, 2:3] / 9.81)
+    return positions, velocities, landings
+
+
+def _episode_flight_time(args):
+    """Return the reference duration before ending an episode."""
+    if args.randomize_throw:
+        return 1.5
+    gravity = 9.81
+    target_height = _ball_radius_m(args.ball_diameter) + 0.003
+    height_delta = max(args.ball_start_height - target_height, 0.0)
+    return (
+        args.ball_vertical_speed
+        + np.sqrt(args.ball_vertical_speed ** 2 + 2.0 * gravity * height_delta)
+    ) / gravity
+
+
 def _reset_ball(scene, args, rng):
     """Reset tennis ball with throw parameters."""
     ball = scene["tennis_ball"]
-    pos_list, vel_list = [], []
-    for _ in range(args.num_envs):
-        p, v, _ = _sample_p2p_throw(rng)
-        pos_list.append(p)
-        vel_list.append(v)
-    pos_np = np.stack(pos_list, axis=0)
-    vel_np = np.stack(vel_list, axis=0)
+    pos_np, vel_np, land_np = _throw_params_per_env(args, rng)
     root_pose = ball.data.default_root_pose.clone()
     root_pose[:, :3] = scene.env_origins + torch.from_numpy(pos_np).float().to(ball.device)
     root_pose[:, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=ball.device).repeat(args.num_envs, 1)
@@ -487,6 +662,7 @@ def _reset_ball(scene, args, rng):
     ball.write_root_link_pose_to_sim_index(root_pose=root_pose)
     ball.write_root_com_velocity_to_sim_index(root_velocity=root_vel)
     ball.reset()
+    return pos_np, land_np
 
 
 def _reset_robot(scene):
@@ -502,18 +678,37 @@ def _reset_robot(scene):
 
 
 # ── VLA frame capture (model inference runs separately in dy-vla env) ────
-def _capture_cams(scene):
-    """Capture the 3 base cameras as uint8 (H, W, 3) dict."""
+def _capture_cams(scene, model_keys=False):
+    """Capture training-aligned RGB frames for saving and VLA transport.
+
+    The training recordings use the camera view rotated by 180 degrees.  Do
+    this at the shared capture boundary so the saved MP4 and the ZeroMQ
+    payload cannot diverge in orientation.
+    """
     frames = {}
-    for key in ["left_base_cam", "right_base_cam", "center_base_cam"]:
-        if key in scene.sensors:
-            f = scene.sensors[key].data.output["rgb"][0].detach().cpu().numpy()
+    for sensor_key, model_key in VLA_CAMERAS:
+        if sensor_key in scene.sensors:
+            f = (
+                scene.sensors[sensor_key]
+                .data.output["rgb"][0]
+                .detach()
+                .cpu()
+                .numpy()
+            )
             if f.shape[-1] == 4:
                 f = f[..., :3]
             if f.dtype != np.uint8:
                 f = np.clip(f, 0, 255).astype(np.uint8)
-            frames[key] = f
+            # 180 degrees is direction-independent; np.rot90(k=2) preserves
+            # the HWC shape and the contiguous copy is required by ZeroMQ.
+            f = np.ascontiguousarray(np.rot90(f, k=2, axes=(0, 1)))
+            frames[model_key if model_keys else sensor_key] = f
     return frames
+
+
+def _rotate_image_180(image):
+    """Rotate an HWC image or HW map by 180 degrees with contiguous storage."""
+    return np.ascontiguousarray(np.rot90(np.asarray(image), k=2, axes=(0, 1)))
 
 
 _DEPTH_CMAP_ANCHORS = np.array(
@@ -578,6 +773,30 @@ def _encode_video_file(frames, output_path, fps=30):
             output.mux(packet)
 
 
+def _write_catch_results(output_path, episode_results, args, n_tests_done, n_success):
+    """Atomically refresh the per-run catch statistics JSON file."""
+    output_dir = os.path.dirname(output_path) or "."
+    os.makedirs(output_dir, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "catch_radius_m": float(args.catch_radius),
+        "randomize_throw": bool(args.randomize_throw),
+        "seed": args.seed,
+        "episodes_completed": int(n_tests_done),
+        "episodes_successful": int(n_success),
+        "success_rate": (
+            float(n_success / n_tests_done) if n_tests_done else 0.0
+        ),
+        "episodes": episode_results,
+    }
+    temporary_path = output_path + ".tmp"
+    with open(temporary_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    os.replace(temporary_path, output_path)
+
+
 def _get_ee_pose_w(scene):
     """End-effector (panda_hand) world pose: pos(3), quat_xyzw(4)."""
     robot = scene["robot"]
@@ -602,6 +821,26 @@ def _get_ee_pose_b(scene):
     return pos_b[0].cpu().numpy(), quat_b[0].cpu().numpy()
 
 
+def _get_ring_center_w(scene):
+    """Return the visual ring center for each environment in world frame."""
+    robot = scene["robot"]
+    ring_idx = int(robot.find_bodies("panda_link7")[0][0])
+    ring_pose_w = robot.data.body_pose_w[:, ring_idx]
+    qx, qy, qz, qw = (
+        ring_pose_w[:, 3], ring_pose_w[:, 4],
+        ring_pose_w[:, 5], ring_pose_w[:, 6],
+    )
+    z_axis_w = torch.stack(
+        (
+            2.0 * (qx * qz + qw * qy),
+            2.0 * (qy * qz - qw * qx),
+            qw * qw - qx * qx - qy * qy + qz * qz,
+        ),
+        dim=-1,
+    )
+    return ring_pose_w[:, :3] + 0.24 * z_axis_w
+
+
 class ArmController:
     """Task-space IK controller driving the Franka arm from 8D VLA actions.
 
@@ -614,6 +853,7 @@ class ArmController:
         self.robot = scene["robot"]
         self.device = device
         self.ee_frame_idx = int(self.robot.find_bodies("panda_hand")[0][0])
+        self.ring_body_idx = int(self.robot.find_bodies("panda_link7")[0][0])
         self.ee_jacobi_idx = self.ee_frame_idx - 1
         self.arm_joint_ids = self.robot.find_joints("panda_joint.*")[0]
         self.finger_joint_ids = self.robot.find_joints("panda_finger.*")[0]
@@ -674,13 +914,45 @@ class ArmController:
             root_pose_w[:, 0:3], root_pose_w[:, 3:7],
             ee_pose_w[:, 0:3], ee_pose_w[:, 3:7])
 
+    def get_ring_center_w(self):
+        """Return the center of the ring mesh in world coordinates."""
+        ring_pose_w = self.robot.data.body_pose_w[:, self.ring_body_idx]
+        qx, qy, qz, qw = (
+            ring_pose_w[:, 3], ring_pose_w[:, 4],
+            ring_pose_w[:, 5], ring_pose_w[:, 6],
+        )
+        z_axis_w = torch.stack(
+            (
+                2.0 * (qx * qz + qw * qy),
+                2.0 * (qy * qz - qw * qx),
+                qw * qw - qx * qx - qy * qy + qz * qz,
+            ),
+            dim=-1,
+        )
+        return ring_pose_w[:, :3] + 0.24 * z_axis_w
 
-def _dataset_video_roundtrip(frames):
-    """Encode frames with libx264 (crf=0, yuv444p, 无损) then decode rgb24.
 
-    Matches the dataset video pipeline so live inference frames have the
-    same (lossless) compression distribution as training frames.
-    """
+@contextlib.contextmanager
+def _silence_stderr_fd():
+    try:
+        stderr_fd = sys.stderr.fileno()
+    except (AttributeError, OSError):
+        yield
+        return
+
+    sys.stderr.flush()
+    saved_stderr_fd = os.dup(stderr_fd)
+    try:
+        with open(os.devnull, "w") as devnull:
+            os.dup2(devnull.fileno(), stderr_fd)
+            yield
+    finally:
+        os.dup2(saved_stderr_fd, stderr_fd)
+        os.close(saved_stderr_fd)
+
+
+def _dataset_video_roundtrip(frames, crf, show_encoder_logs=False):
+    """Round-trip frames through the dataset AV1/yuv420p video pipeline."""
     import io
     import av
     from PIL import Image
@@ -690,23 +962,28 @@ def _dataset_video_roundtrip(frames):
         raise ValueError("Expected frames with shape (N, H, W, 3), got %s" % (frames.shape,))
 
     buffer = io.BytesIO()
-    with av.open(buffer, "w", format="mp4") as output:
-        # libx264 crf=0 + yuv444p = 无损, 与数据集视频管线一致
-        stream = output.add_stream(
-            "libx264",
-            30,
-            options={"crf": "0"},
-        )
-        stream.pix_fmt = "yuv444p"
-        stream.width = frames.shape[2]
-        stream.height = frames.shape[1]
-        for image in frames:
-            for packet in stream.encode(
-                av.VideoFrame.from_image(Image.fromarray(image))
-            ):
+    stderr_context = (
+        contextlib.nullcontext()
+        if show_encoder_logs
+        else _silence_stderr_fd()
+    )
+    with stderr_context:
+        with av.open(buffer, "w", format="mp4") as output:
+            stream = output.add_stream(
+                "libsvtav1",
+                30,
+                options={"g": "2", "crf": str(crf)},
+            )
+            stream.pix_fmt = "yuv420p"
+            stream.width = frames.shape[2]
+            stream.height = frames.shape[1]
+            for image in frames:
+                for packet in stream.encode(
+                    av.VideoFrame.from_image(Image.fromarray(image))
+                ):
+                    output.mux(packet)
+            for packet in stream.encode():
                 output.mux(packet)
-        for packet in stream.encode():
-            output.mux(packet)
 
     buffer.seek(0)
     decoded = []
@@ -804,7 +1081,7 @@ def _spawn_end_ring(num_envs):
     """
     import omni.usd
     from pxr import Gf, UsdGeom, UsdPhysics, PhysxSchema
-    _ring_obj = os.path.normpath(os.path.join(PROJECT_HOME, "objects", "end_ring.obj"))
+    _ring_obj = os.path.normpath(os.path.join(PROJECT_HOME, "tennis", "objects", "end_ring.obj"))
     if not os.path.isfile(_ring_obj):
         print(f"[WARN] End-ring mesh not found: {_ring_obj}", flush=True)
         return
@@ -875,7 +1152,9 @@ def main():
     # Same call order as evaluate_tennis_0804_new.py:
     # write robot/ball state to sim, then scene.reset() applies everything.
     _reset_robot(scene)
-    _reset_ball(scene, args_cli, rng)
+    initial_throw_positions, initial_landing_positions = _reset_ball(
+        scene, args_cli, rng
+    )
     scene.reset()
     scene.write_data_to_sim()
     sim.play()
@@ -887,10 +1166,21 @@ def main():
     episode_idx = 0
     episode_steps = 0
     sim_time = 0.0
-    episode_flight_time = 1.5  # ball flight time per episode
+    episode_flight_time = _episode_flight_time(args_cli)
     observation_frames = []  # camera dictionaries at logical steps 0,2,...,16
     episode_video_frames = [] if args_cli.save_video else None
     throw_pending_since = None  # sim_time when the last episode ended
+    episode_success = False
+    episode_min_ring_distance = float("inf")
+    episode_catch_time = None
+    episode_sim_time_start = 0.0
+    n_tests_done = 0
+    n_success = 0
+    episode_results = []
+    results_path = os.path.join(args_cli.video_dir, "catch_results.json")
+    episode_throw_position = initial_throw_positions[0].tolist()
+    episode_landing_position = initial_landing_positions[0].tolist()
+    _write_catch_results(results_path, episode_results, args_cli, n_tests_done, n_success)
 
     # ── ZeroMQ publisher for VLA frames ──
     zmq_sock = _make_zmq_publisher(args_cli.zmq_host, args_cli.zmq_port) \
@@ -951,11 +1241,26 @@ def main():
         total_steps += 1
         episode_steps += 1
 
+        # Judge a catch geometrically using the actual moving ring center.
+        if args_cli.catch_radius > 0.0:
+            ring_center_w = _get_ring_center_w(scene)[0]
+            ball_pos_w = scene["tennis_ball"].data.root_pos_w[0]
+            ring_distance = torch.linalg.norm(ball_pos_w - ring_center_w).item()
+            episode_min_ring_distance = min(episode_min_ring_distance, ring_distance)
+            if not episode_success and ring_distance <= args_cli.catch_radius:
+                episode_success = True
+                episode_catch_time = sim_time - episode_sim_time_start
+                print(
+                    "[CATCH] Episode %d: ball entered ring radius, distance=%.3f m time=%.3f s"
+                    % (episode_idx, ring_distance, episode_catch_time),
+                    flush=True,
+                )
+
         # ── Per-episode video capture (headless-safe, works with --viz none) ──
         if episode_video_frames is not None:
             _vframes = _capture_cams(scene)
-            _vnames = [n for n in ("left_base_cam", "right_base_cam", "center_base_cam")
-                       if n in _vframes]
+            _vnames = [sensor_key for sensor_key, _ in VLA_CAMERAS
+                       if sensor_key in _vframes]
             if _vnames:
                 if args_cli.record_depth or args_cli.record_segmentation:
                     # 每相机一行 [RGB, 深度, 掩码], 三排垂直堆叠 (与 viz_dataset.py 同布局)
@@ -965,14 +1270,20 @@ def main():
                         if args_cli.record_depth:
                             _d = scene.sensors[_n].data.output[
                                 "distance_to_image_plane"][0].detach().cpu().numpy()
-                            _panels.append(_depth_to_rgb(np.squeeze(_d)))
+                            _panels.append(
+                                _depth_to_rgb(_rotate_image_180(np.squeeze(_d)))
+                            )
                         if args_cli.record_segmentation:
                             _s = scene.sensors[_n].data.output[
                                 "instance_id_segmentation_fast"][0].detach().cpu().numpy()
                             _s = np.squeeze(_s)
                             if _s.ndim == 3 and _s.shape[-1] > 1:
                                 _s = _s[..., 0]
-                            _panels.append(_seg_to_rgb(_s.astype(np.int32)))
+                            _panels.append(
+                                _seg_to_rgb(
+                                    _rotate_image_180(_s).astype(np.int32)
+                                )
+                            )
                         _rows.append(np.concatenate(_panels, axis=1))
                     episode_video_frames.append(np.concatenate(_rows, axis=0))
                 else:
@@ -993,7 +1304,7 @@ def main():
             # rendered camera image is logical frame 0.
             observation_step = episode_steps - 1
             if observation_step in VLA_OBSERVATION_STEPS:
-                observation_frames.append(_capture_cams(scene))
+                observation_frames.append(_capture_cams(scene, model_keys=True))
                 print(f"[VLA] Episode {episode_idx}: captured frame at step "
                       f"{observation_step}", flush=True)
             if observation_step == VLA_OBSERVATION_STEPS[-1]:
@@ -1001,18 +1312,26 @@ def main():
                 if len(observation_frames) == len(VLA_OBSERVATION_STEPS):
                     # Align live frames with the dataset video encoding pipeline
                     if args_cli.vla_match_dataset_video:
-                        _cam_names = ["left_base_cam", "right_base_cam", "center_base_cam"]
+                        _cam_names = [model_key for _, model_key in VLA_CAMERAS]
                         _cam_names = [c for c in _cam_names
                                       if all(c in frame for frame in observation_frames)]
                         for _cn in _cam_names:
                             _sequence = np.stack(
                                 [frame[_cn] for frame in observation_frames]
                             )  # (9, H, W, 3)
-                            _decoded = _dataset_video_roundtrip(_sequence)
+                            _decoded = _dataset_video_roundtrip(
+                                _sequence,
+                                args_cli.lerobot_video_crf,
+                                show_encoder_logs=args_cli.show_svt_logs,
+                            )
                             for _frame, _image in zip(observation_frames, _decoded):
                                 _frame[_cn] = _image
-                        print(f"[VLA] Episode {episode_idx}: applied lossless h264/yuv444p "
-                              f"roundtrip to {len(_cam_names)} cameras", flush=True)
+                        print(
+                            f"[VLA] Episode {episode_idx}: applied AV1/yuv420p "
+                            f"CRF {args_cli.lerobot_video_crf} roundtrip to "
+                            f"{len(_cam_names)} cameras",
+                            flush=True,
+                        )
                     _publish_frames(zmq_sock, episode_idx, observation_frames,
                                     ee_pos_b, ee_quat_b)
                     if controller is not None:
@@ -1033,15 +1352,66 @@ def main():
         if throw_pending_since is None and episode_steps > 10 \
                 and episode_steps * sim_dt >= episode_flight_time:
             throw_pending_since = sim_time
-            print("[INFO] Episode %d ended after %.2f s (%d steps). Next throw in %.1f s."
-                  % (episode_idx, episode_steps * sim_dt, episode_steps,
-                     args_cli.throw_interval), flush=True)
+            n_tests_done += 1
+            n_success += int(episode_success)
+            episode_results.append(
+                {
+                    "episode": int(episode_idx),
+                    "success": bool(episode_success),
+                    "min_ring_distance_m": (
+                        float(episode_min_ring_distance)
+                        if np.isfinite(episode_min_ring_distance) else None
+                    ),
+                    "catch_time_s": (
+                        float(episode_catch_time)
+                        if episode_catch_time is not None else None
+                    ),
+                    "duration_s": float(episode_steps * sim_dt),
+                    "steps": int(episode_steps),
+                    "throw_position": [float(value) for value in episode_throw_position],
+                    "landing_position": [
+                        float(value) for value in episode_landing_position
+                    ],
+                    "successes_so_far": int(n_success),
+                    "episodes_completed": int(n_tests_done),
+                    "success_rate": float(n_success / n_tests_done),
+                }
+            )
+            _write_catch_results(
+                results_path, episode_results, args_cli, n_tests_done, n_success
+            )
+            print(
+                "[INFO] Episode %d ended after %.2f s (%d steps): success=%s "
+                "min_ring_distance=%s catch_time=%s; cumulative success rate=%.1f%%. "
+                "Next throw in %.1f s."
+                % (
+                    episode_idx,
+                    episode_steps * sim_dt,
+                    episode_steps,
+                    episode_success,
+                    "%.3f m" % episode_min_ring_distance
+                    if np.isfinite(episode_min_ring_distance) else "N/A",
+                    "%.3f s" % episode_catch_time
+                    if episode_catch_time is not None else "N/A",
+                    100.0 * n_success / max(1, n_tests_done),
+                    args_cli.throw_interval,
+                ),
+                flush=True,
+            )
             # Save the stitched per-episode video (if requested)
             if episode_video_frames is not None and episode_video_frames:
                 _vpath = os.path.join(args_cli.video_dir, f"ep{episode_idx:04d}_stitched.mp4")
                 _encode_video_file(np.stack(episode_video_frames), _vpath)
                 print(f"[INFO] Saved video → {_vpath}", flush=True)
                 episode_video_frames = []
+
+            if n_tests_done >= args_cli.max_episodes:
+                print(
+                    "[INFO] Reached max_episodes=%d; leaving loop."
+                    % args_cli.max_episodes,
+                    flush=True,
+                )
+                break
 
         if throw_pending_since is not None \
                 and sim_time - throw_pending_since >= args_cli.throw_interval:
@@ -1055,12 +1425,25 @@ def main():
                 inference_waiting = False
                 inference_action_received = False
                 inference_resume_after = 0.0
+            episode_success = False
+            episode_min_ring_distance = float("inf")
+            episode_catch_time = None
+            episode_sim_time_start = sim_time
             # 每集把机械臂瞬移回初始位姿 (与训练数据一致: 每集开头臂在初始位姿静止)
             _reset_robot(scene)
-            _reset_ball(scene, args_cli, rng)
+            throw_positions, landing_positions = _reset_ball(scene, args_cli, rng)
+            episode_throw_position = throw_positions[0].tolist()
+            episode_landing_position = landing_positions[0].tolist()
             scene.write_data_to_sim()
 
-    print("[INFO] Done.", flush=True)
+    if n_tests_done:
+        print(
+            "[INFO] Done. Catch success rate: %d/%d (%.1f%%)."
+            % (n_success, n_tests_done, 100.0 * n_success / n_tests_done),
+            flush=True,
+        )
+    else:
+        print("[INFO] Done. No complete episodes were evaluated.", flush=True)
 
 
 if __name__ == "__main__":

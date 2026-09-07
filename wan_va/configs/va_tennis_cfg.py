@@ -8,7 +8,7 @@ va_tennis_cfg.update(va_shared_cfg)
 
 va_tennis_cfg.wan22_pretrained_model_name_or_path = '/efs-gy1/lijianwen/Pretrained_models/lingbot-va/lingbot-vggt-base'
 
-va_tennis_cfg.attn_window = 36
+va_tennis_cfg.attn_window = 12
 va_tennis_cfg.frame_chunk_size = 2
 va_tennis_cfg.env_type = 'tennis_tshape'
 
@@ -24,10 +24,10 @@ va_tennis_cfg.guidance_scale = 5
 va_tennis_cfg.vggt_guidance_scale = 5
 va_tennis_cfg.action_guidance_scale = 1
 
-va_tennis_cfg.num_inference_steps = 25
-va_tennis_cfg.vggt_num_inference_steps = 25
+va_tennis_cfg.num_inference_steps = 3
+va_tennis_cfg.vggt_num_inference_steps = 3
 va_tennis_cfg.video_exec_step = -1
-va_tennis_cfg.action_num_inference_steps = 50
+va_tennis_cfg.action_num_inference_steps = 5
 
 va_tennis_cfg.snr_shift = 5.0
 va_tennis_cfg.vggt_snr_shift = 5.0
