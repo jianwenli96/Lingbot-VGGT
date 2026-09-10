@@ -3,7 +3,7 @@
 set -x
 
 umask 007
- 
+
 NGPU=${NGPU:-"1"}
 MASTER_PORT=${MASTER_PORT:-"29501"}
 PORT=${PORT:-"1106"}
@@ -24,7 +24,7 @@ torchft_lighthouse=${TORCHFT_LIGHTHOUSE}
 config_name=${CONFIG_NAME}
 
 ## cmd setting
-export HF_DATASETS_CACHE="/efs-gy1/Caches/hf_dataset_cache"
+export HF_DATASETS_CACHE="/efs-mi-east4-2/Caches/hf_dataset_cache"
 export TOKENIZERS_PARALLELISM=false
 PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" TORCHFT_LIGHTHOUSE=${torchft_lighthouse} \
 python -m torch.distributed.run \

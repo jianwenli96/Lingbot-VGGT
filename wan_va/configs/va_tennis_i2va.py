@@ -8,5 +8,5 @@ va_tennis_i2va_cfg.update(va_tennis_cfg)
 va_tennis_i2va_cfg.transformer_path = '/path/to/finetune/transformer'
 va_tennis_i2va_cfg.input_img_path = 'example/piper-overfit'
 va_tennis_i2va_cfg.num_chunks_to_infer = 10
-va_tennis_i2va_cfg.prompt = "{"
+va_tennis_i2va_cfg.prompt = "Catch the green tennis ball"
 va_tennis_i2va_cfg.infer_mode = 'i2va'

@@ -15,8 +15,8 @@ from safetensors import safe_open
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-DEFAULT_SOURCE = Path("/efs-gy1/lijianwen/Pretrained_models/lingbot-va/lingbot-va-base/transformer")
-DEFAULT_OUTPUT = Path("/efs-gy1/lijianwen/Pretrained_models/lingbot-va/lingbot-vggt-base/transformer")
+DEFAULT_SOURCE = Path("/efs-mi-east4-2/lijianwen/Pretrained_models/lingbot-va/lingbot-va-base/transformer")
+DEFAULT_OUTPUT = Path("/efs-mi-east4-2/lijianwen/Pretrained_models/lingbot-va/lingbot-vggt-base/transformer")
 
 
 def parse_args() -> argparse.Namespace:

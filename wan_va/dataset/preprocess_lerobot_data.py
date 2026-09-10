@@ -399,7 +399,7 @@ def get_target_resolution(video_key: str, base_height: int, base_width: int, env
     if env_type == 'robotwin_tshape':
         wrist_list = ['left_wrist', 'right_wrist']
     elif env_type == 'tennis_tshape':
-        wrist_list = ['side_cam', 'wrist_cam']
+        wrist_list = ['left', 'right']
     else:
         wrist_list = []
 
@@ -596,10 +596,10 @@ def main():
     )
     parser.add_argument("--input-dir", type=str, help="Path to directory containing multiple datasets")
     parser.add_argument("--pretrained-model-path", type=str,
-                        default="/efs-gy1/lijianwen/Pretrained_models/lingbot-va/lingbot-vggt-base",
+                        default="/efs-mi-east4-2/lijianwen/Pretrained_models/lingbot-va/lingbot-vggt-base",
                         help="Path to pretrained model root directory (containing vae/, text_encoder/, tokenizer/)")
     parser.add_argument("--vggt-pretrained-model-path", type=str,
-                        default="/efs-gy1/lijianwen/Pretrained_models/VGGT/VGGT-Omega/vggt_omega_1b_512.pt",
+                        default="/efs-mi-east4-2/lijianwen/Pretrained_models/VGGT/VGGT-Omega/vggt_omega_1b_512.pt",
                         help="Path to VGGT-Omega checkpoint.")
     parser.add_argument("--fps", type=float, default=15, help="Target FPS")
     parser.add_argument("--height", type=int, default=256, help="Target height")
@@ -776,7 +776,7 @@ def main():
         empty_emb_path = input_dir / "empty_emb.pt"
 
         # Create a zero tensor with shape (512, 4096) and dtype bfloat16
-        # This matches the content in /efs-gy1/dgh/robotwin-clean-and-aug-lerobot/lerobot_robotwin_eef_clean_50/empty_emb.pt
+        # This matches the content in /efs-mi-east4-2/dgh/robotwin-clean-and-aug-lerobot/lerobot_robotwin_eef_clean_50/empty_emb.pt
         empty_emb = torch.zeros(512, 4096, dtype=torch.bfloat16)
         torch.save(empty_emb, empty_emb_path)
 

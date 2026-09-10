@@ -315,7 +315,7 @@ def main():
     """
     Test script for VGGTAdapter forward functions.
     ```bash
-        cd /efs-gy1/lijianwen/Codes/FastWAM
+        cd /efs-mi-east4-2/lijianwen/Codes/FastWAM
         python -m fastwam.models.wan22.vggt_adapter
     ```
     """
@@ -324,8 +324,8 @@ def main():
     from PIL import Image
 
     parser = argparse.ArgumentParser(description="Test VGGTAdapter encode/decode/forward")
-    parser.add_argument("--vggt_path", type=str, default="/efs-gy1/lijianwen/Pretrained_models/VGGT/VGGT-Omega/vggt_omega_1b_512.pt", help="Path to VGGT checkpoint")
-    parser.add_argument("--image_dir", type=str, default="/efs-gy1/lijianwen/Codes/lingbot-va/example/robotwin", help="Directory containing input images")
+    parser.add_argument("--vggt_path", type=str, default="/efs-mi-east4-2/lijianwen/Pretrained_models/VGGT/VGGT-Omega/vggt_omega_1b_512.pt", help="Path to VGGT checkpoint")
+    parser.add_argument("--image_dir", type=str, default="/efs-mi-east4-2/lijianwen/Codes/lingbot-va/example/robotwin", help="Directory containing input images")
     parser.add_argument("--output_dir", type=str, default="./vggt_output", help="Output directory")
     parser.add_argument("--device", type=str, default="cuda", help="Device (cuda/cpu)")
     parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float16", "bfloat16"])

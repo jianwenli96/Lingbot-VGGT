@@ -3,12 +3,12 @@ from easydict import EasyDict
 
 from .shared_config import va_shared_cfg
 
-va_tennis_cfg = EasyDict(__name__='Config: VA Piper')
+va_tennis_cfg = EasyDict(__name__='Config: VA tennis')
 va_tennis_cfg.update(va_shared_cfg)
 
-va_tennis_cfg.wan22_pretrained_model_name_or_path = '/efs-gy1/lijianwen/Pretrained_models/lingbot-va/lingbot-vggt-base'
+va_tennis_cfg.wan22_pretrained_model_name_or_path = '/efs-mi-east4-2/lijianwen/Pretrained_models/lingbot-va/lingbot-vggt-base'
 
-va_tennis_cfg.attn_window = 12
+va_tennis_cfg.attn_window = 16
 va_tennis_cfg.frame_chunk_size = 2
 va_tennis_cfg.env_type = 'tennis_tshape'
 
@@ -17,8 +17,8 @@ va_tennis_cfg.width = 320
 va_tennis_cfg.action_dim = 30
 va_tennis_cfg.action_per_frame = 8
 va_tennis_cfg.obs_cam_keys = [
-    'observation.images.opst_cam', 'observation.images.side_cam',
-    'observation.images.wrist_cam'
+    'observation.images.upper', 'observation.images.left',
+    'observation.images.right'
 ]
 va_tennis_cfg.guidance_scale = 5
 va_tennis_cfg.vggt_guidance_scale = 5
@@ -55,7 +55,7 @@ va_tennis_cfg.norm_stat = {
 }
 
 # VGGTOmega config. Keep these values aligned with the training config and
-va_tennis_cfg.vggt_pretrained_model_name_or_path = "/efs-gy1/lijianwen/Pretrained_models/VGGT/VGGT-Omega/vggt_omega_1b_512.pt"
+va_tennis_cfg.vggt_pretrained_model_name_or_path = "/efs-mi-east4-2/lijianwen/Pretrained_models/VGGT/VGGT-Omega/vggt_omega_1b_512.pt"
 va_tennis_cfg.vggt_image_size = 512
 va_tennis_cfg.vggt_latent_frame_mode = "concat"
 va_tennis_cfg.vggt_latent_dimension = 2048

@@ -36,7 +36,7 @@ VA_CONFIGS = {
     'aloha_3dcmp_server': va_aloha_3dcmp_server_cfg,
     'aloha_generalization_train': va_aloha_generalization_train_cfg,
     'aloha_generalization_server': va_aloha_generalization_server_cfg,
-    'tennis_cfg': va_tennis_cfg,
+    'tennis': va_tennis_cfg,
     'tennis_i2va': va_tennis_i2va_cfg,
     'tennis_train': va_tennis_train_cfg
 }

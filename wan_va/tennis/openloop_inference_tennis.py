@@ -59,6 +59,17 @@ from utils import data_seq_to_patch, init_logger, logger
 from wan_va_server import VA_Server
 
 
+def tennis_pose(actions):
+    """Select the trailing [x, y, z, rx, ry, rz] from dataset rows."""
+    values = np.asarray(actions, dtype=np.float64)
+    if values.ndim < 1 or values.shape[-1] < 6:
+        raise ValueError(f"Expected at least six tennis pose channels, got {values.shape}")
+    pose = values[..., -6:]
+    if not np.isfinite(pose).all():
+        raise ValueError("Tennis pose contains NaN or Inf")
+    return pose
+
+
 def make_uniform_timestamps(
     num_frames: int,
     sample_fps: float,
@@ -1372,7 +1383,7 @@ def build_action_prefix(
                 f"got {actions.shape}"
             )
         if len(history):
-            history = make_pose_6d_relative_to_first(history[:, :7])
+            history = make_pose_6d_relative_to_first(tennis_pose(history))
 
     zero_anchor = np.zeros(
         (action_per_frame, history.shape[1] if len(history) else actions.shape[1]),
@@ -1572,6 +1583,7 @@ def save_trajectory_plot(
         ]
     elif env_type == "tennis_tshape":
         # Tennis uses 6D action: [x, y, z, rx, ry, rz]
+        gt_actions = tennis_pose(gt_actions)
         if gt_actions.shape[1] < 6 or predicted_relative.shape[1] < 3:
             raise ValueError(
                 "tennis requires 6D action layout with xyz at channels 0:3; "
@@ -1586,6 +1598,7 @@ def save_trajectory_plot(
             action_prefix_metadata.get("relative_pose_base_action", []),
             dtype=np.float64,
         )
+        base_action = tennis_pose(base_action)
         if base_action.size < 3:
             raise ValueError(
                 "Tennis absolute reconstruction requires "
@@ -2086,7 +2099,7 @@ def run(args: argparse.Namespace) -> None:
         decode_args = [
             sys.executable,
             "-m",
-            "wan_va.inference_video_prefix",
+            "wan_va.tennis.openloop_inference_tennis",
             "--config-name",
             args.config_name,
             "--model-path",

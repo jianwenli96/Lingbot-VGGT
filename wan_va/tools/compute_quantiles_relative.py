@@ -18,6 +18,7 @@ from scipy.spatial.transform import Rotation as R
 from lerobot.constants import HF_LEROBOT_HOME
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def recursive_find_file(directory, filename='info.json'):
@@ -278,7 +279,7 @@ class LatentLeRobotDataset(LeRobotDataset):
             right_action = get_relative_pose(action[:, 8:15])
             action = np.concatenate([left_action, action[:, 7:8], right_action, action[:, 15:16]], axis=1)
         elif self.config.env_type == 'tennis_tshape':
-            action = get_relative_pose_6d(action[:, :7]).numpy()
+            action = get_relative_pose_6d(action[:, -6:]).numpy()
         else:
             action = action
         return torch.from_numpy(action).float()
@@ -323,7 +324,7 @@ if __name__ == '__main__':
     from wan_va.configs import VA_CONFIGS
     from tqdm import tqdm
     dset = MultiLatentLeRobotDataset(
-        VA_CONFIGS['va_tennis_train'],
+        VA_CONFIGS['tennis_train'],
         num_init_worker=128
     )
     dloader = DataLoader(

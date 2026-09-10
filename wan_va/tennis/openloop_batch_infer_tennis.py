@@ -1,7 +1,7 @@
 """Batch inference on entire validation set and compute average Euclidean distance.
 
 Example:
-    python -m wan_va.tennis.batch_openloop_tennis \
+    python -m wan_va.tennis.openloop_batch_infer_tennis \
         --config-name demo_i2av \
         --dataset-root /data/my_lerobot_dataset \
         --output-dir outputs/batch_val_results
@@ -28,13 +28,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from configs import VA_CONFIGS
-from openloop_inference_tennis import (
+from .openloop_inference_tennis import (
     VideoPrefixInference,
     load_lerobot_episode,
     load_lerobot_actions,
     flatten_predicted_actions,
     make_uniform_timestamps,
     build_action_prefix,
+    tennis_pose
 )
 from ..utils import init_logger, logger
 
@@ -235,8 +236,8 @@ def compute_endpoint_distance(
         pred_endpoint = base_action[:3] + predicted_relative[-1, :3]
         gt_endpoint = gt_actions[-1, :3]
     elif env_type == "tennis_tshape":
-        if base_action.size < 3:
-            raise ValueError("Tennis requires base_action with at least 3 channels")
+        base_action = tennis_pose(base_action)
+        gt_actions = tennis_pose(gt_actions)
         pred_endpoint = base_action[:3] + predicted_relative[-1, :3]
         gt_endpoint = gt_actions[-1, :3]
     else:

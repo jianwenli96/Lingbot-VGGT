@@ -344,7 +344,7 @@ class LatentLeRobotDataset(LeRobotDataset):
         elif self.config.env_type == 'aloha_tshape':
             action = action[..., :28]
         elif self.config.env_type == 'tennis_tshape':
-            action = get_relative_pose_6d(action[:, :7])
+            action = get_relative_pose_6d(action[:, -6:])
         action = np.pad(action, pad_width=((frame_stride * 4, 0), (0, 0)), mode='constant', constant_values=0)
 
         latent_frame_num = (len(latent_frame_ids) - 1) // 4 + 1
@@ -416,7 +416,7 @@ if __name__ == '__main__':
     from wan_va.configs import VA_CONFIGS
     from tqdm import tqdm
     dset = MultiLatentLeRobotDataset(
-        VA_CONFIGS['robotwin_train']
+        VA_CONFIGS['tennis_train']
     )
     for key, value in dset[0].items():
         if isinstance(value, torch.Tensor):
