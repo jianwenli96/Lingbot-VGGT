@@ -1,7 +1,8 @@
 # Copyright 2024-2025 The Robbyant Team Authors. All rights reserved.
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
-from lerobot.datasets.utils import get_episode_data_index
+from lerobot.datasets.utils import get_episode_data_index, get_safe_version
 from lerobot.datasets.compute_stats import aggregate_stats, compute_episode_stats
+import packaging
 import numpy as np
 from pathlib import Path
 from collections.abc import Callable
@@ -170,7 +171,7 @@ class LatentLeRobotDataset(LeRobotDataset):
             self.hf_dataset = self.load_hf_dataset()
         except (AssertionError, FileNotFoundError, NotADirectoryError):
             self.revision = get_safe_version(self.repo_id, self.revision)
-            self.download_episodes(download_videos)
+            self.download_episodes(download_videos=True)
             self.hf_dataset = self.load_hf_dataset()
         self.episode_data_index = get_episode_data_index(self.meta.episodes, self.episodes)
         

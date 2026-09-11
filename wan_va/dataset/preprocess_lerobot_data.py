@@ -15,6 +15,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
+import multiprocessing as mp
 
 import numpy as np
 import torch
@@ -401,7 +402,7 @@ def get_target_resolution(video_key: str, base_height: int, base_width: int, env
         wrist_list = ['side_cam', 'wrist_cam']
     else:
         wrist_list = []
-    
+
     # Check if this is a wrist camera
     is_wrist = any(wrist_key in video_key for wrist_key in wrist_list)
     if is_wrist:
@@ -413,14 +414,184 @@ def get_target_resolution(video_key: str, base_height: int, base_width: int, env
     return base_height, base_width
 
 
+# ==================== Worker function for parallel processing ====================
+
+def process_dataset_worker(args_dict: dict):
+    """Worker function that processes a subset of episodes on a specific device.
+
+    This is designed to be called via torch.multiprocessing.Process.
+    """
+    device = args_dict['device']
+    dataset_path = Path(args_dict['dataset_path'])
+    args = argparse.Namespace(**args_dict['namespace_args'])
+    episode_indices = args_dict['episode_indices']
+
+    print(f"[Worker {device}] Started, processing {len(episode_indices)} episodes")
+
+    # Build model paths
+    vae_path = Path(args.pretrained_model_path) / "vae"
+    text_encoder_path = Path(args.pretrained_model_path) / "text_encoder"
+    tokenizer_path = Path(args.pretrained_model_path) / "tokenizer"
+
+    dtype_map = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
+    dtype = dtype_map[args.dtype]
+
+    # Load models on this device
+    print(f"[Worker {device}] Loading models...")
+    vae = load_vae(str(vae_path), dtype, device)
+    text_encoder = load_text_encoder(str(text_encoder_path), dtype, device)
+    tokenizer = load_tokenizer(str(tokenizer_path))
+
+    vggt_adapter = None
+    if not args.skip_step3:
+        print(f"[Worker {device}] Loading VGGT-Omega adapter...")
+        vggt_adapter_config = {
+            "default_image_size": args.vggt_image_size,
+            "latent_frame_mode": args.vggt_latent_frame_mode,
+            "latent_dimension": args.vggt_latent_dimension
+        }
+        vggt_adapter = VGGTAdapter.from_pretrained(
+            vggt_adapter_config=vggt_adapter_config,
+            vggt_pretrained_path=args.vggt_pretrained_model_path,
+            device=device,
+            torch_dtype=dtype,
+        )
+        vggt_adapter.eval()
+
+    print(f"[Worker {device}] Models loaded")
+
+    # Read episodes
+    episodes_path = dataset_path / "meta" / "episodes.jsonl"
+    all_episodes = []
+    with open(episodes_path, 'r') as f:
+        for line in f:
+            if line.strip():
+                all_episodes.append(json.loads(line))
+
+    # Filter episodes for this worker
+    episodes = [all_episodes[i] for i in episode_indices]
+
+    # Auto-detect video keys
+    video_keys = args.video_keys
+    if video_keys is None:
+        videos_dir = dataset_path / "videos"
+        if videos_dir.exists():
+            chunk_dirs = list(videos_dir.glob("chunk-*"))
+            if chunk_dirs:
+                video_keys = [d.name for d in chunk_dirs[0].iterdir() if d.is_dir()]
+
+    if not video_keys:
+        print(f"[Worker {device}] No video keys found, skipping")
+        return
+
+    # Detect or use specified env_type
+    env_type = args.env_type
+    if env_type is None:
+        if any('left_wrist' in vk for vk in video_keys) and any('right_wrist' in vk for vk in video_keys):
+            env_type = 'robotwin_tshape'
+            print(f"[Worker {device}] Auto-detected env_type: {env_type}")
+        else:
+            print(f"[Worker {device}] No env_type detected, using base resolution for all cameras")
+    else:
+        print(f"[Worker {device}] Using env_type: {env_type}")
+
+    # Create latents directories
+    latents_dir = dataset_path / "latents"
+    latents_dir.mkdir(exist_ok=True)
+    if not args.skip_step3:
+        vggt_latents_dir = dataset_path / "vggt_latents"
+        vggt_latents_dir.mkdir(exist_ok=True)
+
+    # Process episodes assigned to this worker
+    for episode in tqdm(episodes, desc=f"[Worker {device}] Processing episodes", position=int(device.split(':')[-1])):
+        episode_index = episode['episode_index']
+        episode_chunk = episode.get('episode_chunk', 0)
+        action_configs = episode['action_config']
+
+        for acfg in action_configs:
+            start_frame = acfg['start_frame']
+            end_frame = acfg['end_frame']
+            action_text = acfg['action_text']
+
+            if not args.skip_step3:
+                video_multiview_frames = []
+                video_multiview_latents = []
+                video_multiview_keys = []
+
+            for video_key in video_keys:
+                video_file = (
+                    dataset_path / "videos" / f"chunk-{episode_chunk:03d}" /
+                    video_key / f"episode_{episode_index:06d}.mp4"
+                )
+
+                if not video_file.exists():
+                    continue
+
+                latent_key_dir = latents_dir / f"chunk-{episode_chunk:03d}" / video_key
+                latent_key_dir.mkdir(parents=True, exist_ok=True)
+                latent_file = latent_key_dir / f"episode_{episode_index:06d}_{start_frame}_{end_frame}.pth"
+
+                target_height, target_width = get_target_resolution(
+                    video_key, args.height, args.width, env_type
+                )
+
+                try:
+                    latent_data, frames = extract_latents_from_video(
+                        vae, str(video_file), action_text, text_encoder, tokenizer,
+                        args.fps, target_height, target_width,
+                        start_frame, end_frame, dtype, device
+                    )
+                    torch.save(latent_data, latent_file)
+                    if not args.skip_step3:
+                        video_multiview_frames.append(frames)
+                        video_multiview_latents.append(latent_data)
+                        video_multiview_keys.append(video_key)
+                except Exception as e:
+                    print(f"\n[Worker {device}] Error processing {video_file}: {e}")
+                    raise
+
+            if not args.skip_step3:
+                if len(video_multiview_keys) != len(video_keys):
+                    missing_keys = sorted(set(video_keys) - set(video_multiview_keys))
+                    print(
+                        f"\n[Worker {device}] Skipping VGGT-Omega in episode {episode_index} "
+                        f"frames {start_frame}-{end_frame}: missing/failed views {missing_keys}"
+                    )
+                    continue
+
+                vggt_latent_key_dir = vggt_latents_dir / f"chunk-{episode_chunk:03d}"
+                vggt_latent_key_dir.mkdir(parents=True, exist_ok=True)
+                vggt_latent_file = (vggt_latent_key_dir / f"episode_{episode_index:06d}_{start_frame}_{end_frame}.pth")
+                try:
+                    vggt_latent_data = extract_vggt_latents_from_video(
+                        vggt_adapter,
+                        video_multiview_frames,
+                        video_multiview_latents,
+                        view_keys=video_multiview_keys,
+                        start_frame=start_frame,
+                        end_frame=end_frame,
+                        dtype=dtype,
+                        device=device,
+                    )
+                    torch.save(vggt_latent_data, vggt_latent_file)
+                except Exception as e:
+                    print(f"\n[Worker {device}] Error processing VGGT-Omega in episode {episode_index}: {e}")
+                    raise
+
+    print(f"[Worker {device}] Completed {len(episode_indices)} episodes")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Process dataset using Wan2.2 VAE and text encoder",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
             Examples:
-            # Process multiple datasets in a directory:
-            python preprocess_lerobot_data.py --input-dir /path/to/datasets
+              # Single GPU (serial, original behavior):
+              python preprocess_lerobot_data.py --input-dir /path/to/datasets
+
+              # 8-GPU parallel (distribute episodes across 8 NPU cards):
+              python preprocess_lerobot_data.py --input-dir /path/to/datasets --num-devices 8
         """
     )
     parser.add_argument("--input-dir", type=str, help="Path to directory containing multiple datasets")
@@ -441,8 +612,12 @@ def main():
                         help="VGGT-Omega latent frame mode (e.g., 'concat', 'every_first')")
     parser.add_argument("--vggt-latent-dimension", type=int, default=2048,
                         help="VGGT-Omega latent dimension")
+    parser.add_argument("--num-devices", type=int, default=1,
+                        help="Number of NPU devices to use for parallel processing (default: 1 = serial)")
+    parser.add_argument("--device-ids", type=str, default=None,
+                        help="Comma-separated device IDs to use (e.g., '0,1,2,3'). Default: 0..num-devices-1")
+    parser.add_argument("--device", type=str, default="npu:0", help="Device to use (only used when num-devices=1)")
     parser.add_argument("--video-keys", type=str, nargs='+', help="Video keys to process")
-    parser.add_argument("--device", type=str, default="npu:0", help="Device to use")
     parser.add_argument("--dtype", type=str, default="bfloat16", help="Data type")
     parser.add_argument("--skip-step1", action="store_true", help="Skip Step 1 (action_config generation)")
     parser.add_argument("--skip-step2", action="store_true", help="Skip Step 2 (latent extraction)")
@@ -478,206 +653,117 @@ def main():
     if not dataset_paths:
         raise ValueError("No datasets found to process")
 
-    # Build model paths from pretrained-model-path
-    vae_path = Path(args.pretrained_model_path) / "vae"
-    text_encoder_path = Path(args.pretrained_model_path) / "text_encoder"
-    tokenizer_path = Path(args.pretrained_model_path) / "tokenizer"
-
-    dtype_map = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
-    dtype = dtype_map[args.dtype]
-
-    # Check device availability
-    if args.device.startswith('npu'):
-        if not (hasattr(torch, 'npu') and torch.npu.is_available()):
-            print("NPU not available, falling back to CPU")
-            args.device = 'cpu'
-
-    print(f"\n{'='*60}")
-    print(f"Configuration:")
-    print(f"  Device: {args.device}")
-    print(f"  Dtype: {args.dtype}")
-    print(f"  Target resolution: {args.height}x{args.width} @ {args.fps} fps")
-    print(f"  Pretrained model: {args.pretrained_model_path}")
-    print(f"  VGGT-Omega image size: {args.vggt_image_size[0]}x{args.vggt_image_size[1]}")
-    print(f"  VGGT-Omega latent frame mode: {args.vggt_latent_frame_mode}")
-    print(f"  VGGT-Omega latent dimension: {args.vggt_latent_dimension}")
-    print(f"  VGGT-Omega Pretrained model: {args.vggt_pretrained_model_path}")
-    print(f"  Steps: Step1={not args.skip_step1}, Step2={not args.skip_step2}, Step3={not args.skip_step3}")
-    print(f"{'='*60}\n")
-
-    # Load models (only if Step 2/Step 3 is enabled)
-    vae, text_encoder, tokenizer, vggt_adapter = None, None, None, None
-
-    if not args.skip_step2:
-        print("Loading models for Step 2...")
-        print(f"  VAE: {vae_path}")
-        print(f"  Text encoder: {text_encoder_path}")
-        print(f"  Tokenizer: {tokenizer_path}")
-
-        vae = load_vae(str(vae_path), dtype, args.device)
-        text_encoder = load_text_encoder(str(text_encoder_path), dtype, args.device)
-        tokenizer = load_tokenizer(str(tokenizer_path))
-
-    if not args.skip_step3:
-        print("Loading VGGT-Omega adapter for Step 3...")
-        vggt_adapter_config = {
-            "default_image_size": args.vggt_image_size,
-            "latent_frame_mode": args.vggt_latent_frame_mode,
-            "latent_dimension": args.vggt_latent_dimension
-        }
-        vggt_adapter = VGGTAdapter.from_pretrained(
-            vggt_adapter_config=vggt_adapter_config,
-            vggt_pretrained_path=args.vggt_pretrained_model_path,
-            device=args.device,
-            torch_dtype=dtype,
-        )
-        vggt_adapter.eval()
-
-    print("  ✓ Models loaded\n")
-
-    # Process each dataset
-    for dataset_idx, dataset_path in enumerate(dataset_paths, 1):
-        print(f"\n{'='*60}")
-        print(f"[{dataset_idx}/{len(dataset_paths)}] Processing: {dataset_path.name}")
-        print(f"{'='*60}\n")
-
-        # Step 1: Generate action_config
-        if not args.skip_step1:
-            print("\nStep 1: Generating action_config...")
+    # Step 1 is always done serially (it's lightweight and modifies the same episodes.jsonl)
+    if not args.skip_step1:
+        print("\nStep 1: Generating action_config (serial)...")
+        for dataset_path in dataset_paths:
+            print(f"  Processing {dataset_path.name}...")
             update_episodes_jsonl(dataset_path)
 
-        # Step 2 and Step 3: Extract latents
-        if not args.skip_step2:
-            print("\nStep 2: Extracting latents...")
-            if not args.skip_step3:
-                print("\nStep 3: Extracting VGGT-Omega latents...")
+    # Steps 2 & 3
+    if not args.skip_step2:
+        # Determine number of devices
+        num_devices = args.num_devices
 
-            # Auto-detect video keys
-            video_keys = args.video_keys
-            if video_keys is None:
-                videos_dir = dataset_path / "videos"
-                if videos_dir.exists():
-                    chunk_dirs = list(videos_dir.glob("chunk-*"))
-                    if chunk_dirs:
-                        video_keys = [d.name for d in chunk_dirs[0].iterdir() if d.is_dir()]
-                        print(f"  Auto-detected video keys: {video_keys}")
+        if args.device_ids is not None:
+            device_ids = [int(x.strip()) for x in args.device_ids.split(',')]
+            num_devices = len(device_ids)
+        else:
+            device_ids = list(range(num_devices))
 
-            if not video_keys:
-                print("  Warning: No video keys found, skipping Step 2")
-                continue
+        device_id_strs = [f"npu:{did}" for did in device_ids]
 
-            # Detect or use specified env_type
-            env_type = args.env_type
-            if env_type is None:
-                # Try to auto-detect from dataset structure
-                # If video keys contain 'left_wrist' and 'right_wrist', it's likely robotwin_tshape
-                if any('left_wrist' in vk for vk in video_keys) and any('right_wrist' in vk for vk in video_keys):
-                    env_type = 'robotwin_tshape'
-                    print(f"  Auto-detected env_type: {env_type}")
-                else:
-                    env_type = None
-                    print(f"  No env_type detected, using base resolution for all cameras")
-            else:
-                print(f"  Using env_type: {env_type}")
+        print(f"\n{'='*60}")
+        print(f"Configuration:")
+        print(f"  Devices: {num_devices} ({', '.join(device_id_strs)})")
+        print(f"  Dtype: {args.dtype}")
+        print(f"  Target resolution: {args.height}x{args.width} @ {args.fps} fps")
+        print(f"  Pretrained model: {args.pretrained_model_path}")
+        print(f"  VGGT-Omega image size: {args.vggt_image_size[0]}x{args.vggt_image_size[1]}")
+        print(f"  VGGT-Omega latent frame mode: {args.vggt_latent_frame_mode}")
+        print(f"  VGGT-Omega latent dimension: {args.vggt_latent_dimension}")
+        print(f"  Steps: Step2={not args.skip_step2}, Step3={not args.skip_step3}")
+        print(f"{'='*60}\n")
 
-            # Read episodes
+        # Process each dataset
+        for dataset_idx, dataset_path in enumerate(dataset_paths, 1):
+            print(f"\n{'='*60}")
+            print(f"[{dataset_idx}/{len(dataset_paths)}] Processing: {dataset_path.name}")
+            print(f"{'='*60}\n")
+
+            # Read episodes to split work
             episodes_path = dataset_path / "meta" / "episodes.jsonl"
-            episodes = []
+            all_episodes = []
             with open(episodes_path, 'r') as f:
                 for line in f:
                     if line.strip():
-                        episodes.append(json.loads(line))
+                        all_episodes.append(json.loads(line))
 
-            # Create latents directory
+            total_episodes = len(all_episodes)
+            print(f"  Total episodes: {total_episodes}")
+
+            if num_devices == 1:
+                # Serial processing
+                single_worker_args = {
+                    'device': args.device,
+                    'dataset_path': str(dataset_path),
+                    'namespace_args': vars(args),
+                    'episode_indices': list(range(total_episodes)),
+                }
+                process_dataset_worker(single_worker_args)
+            else:
+                # Parallel processing: split episodes into chunks
+                # Ensure each chunk has approximately equal size
+                chunk_size = (total_episodes + num_devices - 1) // num_devices
+                chunks = []
+                for i in range(num_devices):
+                    start_idx = i * chunk_size
+                    end_idx = min(start_idx + chunk_size, total_episodes)
+                    if start_idx < total_episodes:
+                        chunks.append(list(range(start_idx, end_idx)))
+
+                print(f"  Splitting {total_episodes} episodes across {len(chunks)} workers:")
+                for i, chunk in enumerate(chunks):
+                    print(f"    {device_id_strs[i]}: episodes {chunk[0]}-{chunk[-1]} ({len(chunk)} episodes)")
+
+                # Spawn worker processes
+                ctx = mp.get_context('spawn')
+                processes = []
+                for i, chunk in enumerate(chunks):
+                    worker_args = {
+                        'device': device_id_strs[i],
+                        'dataset_path': str(dataset_path),
+                        'namespace_args': vars(args),
+                        'episode_indices': chunk,
+                    }
+                    p = ctx.Process(
+                        target=process_dataset_worker,
+                        args=(worker_args,),
+                        name=f"Worker-{device_id_strs[i]}",
+                    )
+                    p.start()
+                    processes.append(p)
+
+                # Wait for all workers to finish
+                for p in processes:
+                    p.join()
+
+                # Check for failures
+                failed = False
+                for p in processes:
+                    if p.exitcode != 0:
+                        print(f"Worker {p.name} failed with exit code {p.exitcode}")
+                        failed = True
+
+                if failed:
+                    print(f"\n  ✗ Some workers failed for dataset {dataset_path.name}")
+                else:
+                    print(f"\n  ✓ All workers completed successfully for {dataset_path.name}")
+
             latents_dir = dataset_path / "latents"
-            latents_dir.mkdir(exist_ok=True)
-            if not args.skip_step3:
-                vggt_latents_dir = dataset_path / "vggt_latents"
-                vggt_latents_dir.mkdir(exist_ok=True)
-
-            # Process episodes
-            for episode in tqdm(episodes, desc=f"  Processing episodes"):
-                episode_index = episode['episode_index']
-                episode_chunk = episode.get('episode_chunk', 0)
-                action_configs = episode['action_config']
-
-                for acfg in action_configs:
-                    start_frame = acfg['start_frame']
-                    end_frame = acfg['end_frame']
-                    action_text = acfg['action_text']
-
-                    if not args.skip_step3:
-                        video_multiview_frames = []
-                        video_multiview_latents = []
-                        video_multiview_keys = []
-
-                    # video latents
-                    for video_key in video_keys:
-                        video_file = (
-                            dataset_path / "videos" / f"chunk-{episode_chunk:03d}" /
-                            video_key / f"episode_{episode_index:06d}.mp4"
-                        )
-
-                        if not video_file.exists():
-                            continue
-
-                        latent_key_dir = latents_dir / f"chunk-{episode_chunk:03d}" / video_key
-                        latent_key_dir.mkdir(parents=True, exist_ok=True)
-                        latent_file = latent_key_dir / f"episode_{episode_index:06d}_{start_frame}_{end_frame}.pth"
-
-                        # Get target resolution for this video key
-                        target_height, target_width = get_target_resolution(
-                            video_key, args.height, args.width, env_type
-                        )
-
-                        # Print resolution info for first episode
-                        if episode_index == 0 and action_configs and action_configs[0]['start_frame'] == 0:
-                            print(f"    {video_key}: target resolution {target_height}×{target_width}")
-
-                        try:
-                            latent_data, frames = extract_latents_from_video(
-                                vae, str(video_file), action_text, text_encoder, tokenizer,
-                                args.fps, target_height, target_width,  # Use computed resolution
-                                start_frame, end_frame, dtype, args.device
-                            )
-                            torch.save(latent_data, latent_file)
-                            if not args.skip_step3:
-                                video_multiview_frames.append(frames)
-                                video_multiview_latents.append(latent_data)
-                                video_multiview_keys.append(video_key)
-                        except Exception as e:
-                            raise ValueError(f"\n  Error processing {video_file}: {e}")
-
-                    if not args.skip_step3:
-                        if len(video_multiview_keys) != len(video_keys):
-                            missing_keys = sorted(set(video_keys) - set(video_multiview_keys))
-                            print(
-                                f"\n  Skipping VGGT-Omega in episode {episode_index} "
-                                f"frames {start_frame}-{end_frame}: missing/failed views {missing_keys}"
-                            )
-                            continue
-
-                        # VGGT-Omega latents
-                        vggt_latent_key_dir = vggt_latents_dir / f"chunk-{episode_chunk:03d}"
-                        vggt_latent_key_dir.mkdir(parents=True, exist_ok=True)
-                        vggt_latent_file = (vggt_latent_key_dir / f"episode_{episode_index:06d}_{start_frame}_{end_frame}.pth")
-                        try:
-                            vggt_latent_data = extract_vggt_latents_from_video(
-                                vggt_adapter,
-                                video_multiview_frames,
-                                video_multiview_latents,
-                                view_keys=video_multiview_keys,
-                                start_frame=start_frame,
-                                end_frame=end_frame,
-                                dtype=dtype,
-                                device=args.device,
-                            )
-                            torch.save(vggt_latent_data, vggt_latent_file)
-                        except Exception as e:
-                            raise ValueError(f"\n  Error processing VGGT-Omega in episode {episode_index}: {e}")
-
             print(f"  ✓ Latents saved to {latents_dir}")
             if not args.skip_step3:
+                vggt_latents_dir = dataset_path / "vggt_latents"
                 print(f"  ✓ VGGT-Omega latents saved to {vggt_latents_dir}")
 
     print(f"\n{'='*60}")
