@@ -24,7 +24,6 @@ log_rank=${LOG_RANK}
 config_name=${CONFIG_NAME}
 
 ## cmd setting
-export HF_DATASETS_CACHE="/efs-mi-east4-2/Caches/hf_dataset_cache"
 export TOKENIZERS_PARALLELISM=false
 
 # 建议增加 NCCL 调试日志和网卡指定（如果有多网卡环境）
