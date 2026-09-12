@@ -45,12 +45,10 @@ va_tennis_cfg.inverse_used_action_channel_ids = inverse_used_action_channel_ids
 va_tennis_cfg.action_norm_method = 'quantiles'
 va_tennis_cfg.norm_stat = {
     "q01": [
-        -0.1449, -0.4092, -0.3164,
-        -0.2735, -0.2376, -0.2827
+        -0.6256, -0.2168,  0.0000, -0.0076, -0.0187, -0.0153
     ] + [0.] * 24,
     "q99": [
-        0.2387, 0.4038, 0.1133,
-        0.2762, 0.3646, 0.2991
+        0.6297, 0.7398, 0.0337, 0.0784, 0.0186, 0.0158
     ] + [0.] * 24,
 }
 
