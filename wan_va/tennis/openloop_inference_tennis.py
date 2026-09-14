@@ -59,6 +59,117 @@ from utils import data_seq_to_patch, init_logger, logger
 from wan_va_server import VA_Server
 
 
+def relative_pose_6d(pose):
+    """World-axis displacement and xyz Euler rotation relative to row zero."""
+    from scipy.spatial.transform import Rotation
+    pose = np.asarray(pose, dtype=np.float64)
+    if pose.ndim != 2 or pose.shape[1] != 6 or len(pose) == 0:
+        raise ValueError(f"Expected nonempty [T,6] poses, got {pose.shape}")
+    if not np.isfinite(pose).all():
+        raise ValueError("Pose contains NaN or Inf")
+    rotation = Rotation.from_euler("xyz", pose[:, 3:])
+    relative_rotation = rotation[0].inv() * rotation
+    return np.concatenate(
+        [pose[:, :3] - pose[:1, :3], relative_rotation.as_euler("xyz")], axis=1
+    )
+
+
+def normalize_actions(actions, inverse_channel_ids, q01, q99):
+    """Match training normalization locally; return model values and mask.
+
+    The appended channel is padding. Physical zeros (including the initial
+    anchor block) are normalized and supervised just like any other action.
+    """
+    actions = np.asarray(actions, dtype=np.float64)
+    if actions.ndim != 2 or not np.isfinite(actions).all():
+        raise ValueError("Actions must be finite [T,D] values")
+    ids = np.asarray(inverse_channel_ids, dtype=np.int64)
+    low = np.asarray(q01, dtype=np.float64).reshape(-1)
+    high = np.asarray(q99, dtype=np.float64).reshape(-1)
+    if ids.ndim != 1 or low.shape != ids.shape or high.shape != ids.shape:
+        raise ValueError("Action channel mapping and quantile dimensions differ")
+    if np.any(ids < 0) or np.any(ids > actions.shape[1]):
+        raise ValueError("Action channel mapping is outside the physical layout")
+    padded = np.pad(actions, ((0, 0), (0, 1)))
+    mask = np.broadcast_to(ids < actions.shape[1], (len(actions), len(ids))).copy()
+    normalized = (padded[:, ids] - low) / (high - low + 1e-6) * 2.0 - 1.0
+    normalized = np.clip(normalized, -1.5, 1.5) * mask
+    return normalized.astype(np.float32), mask
+
+
+def match_future_actions(timestamps, start_index, count, fps, tolerance):
+    """Require a complete, consecutive GT interval matching the control clock."""
+    timestamps = np.asarray(timestamps, dtype=np.float64)
+    if (timestamps.ndim != 1 or not np.isfinite(timestamps).all()
+            or np.any(np.diff(timestamps) <= 0)):
+        raise ValueError("GT timestamps must be finite and strictly increasing")
+    if count <= 0 or not np.isfinite(fps) or fps <= 0:
+        raise ValueError("Prediction count and FPS must be positive")
+    if not np.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("Timestamp tolerance must be finite and nonnegative")
+    end_index = start_index + count
+    if start_index < 0 or end_index > len(timestamps):
+        raise ValueError(
+            f"Complete future GT required: action rows [{start_index}, {end_index}), "
+            f"but episode has {len(timestamps)} rows. Shorten the prediction horizon."
+        )
+    expected = timestamps[start_index] + np.arange(count) / fps
+    right = np.searchsorted(timestamps, expected).clip(0, len(timestamps) - 1)
+    left = (right - 1).clip(0)
+    indices = np.where(
+        np.abs(timestamps[left] - expected) <= np.abs(timestamps[right] - expected),
+        left, right,
+    )
+    if not np.array_equal(indices, np.arange(start_index, end_index)):
+        raise ValueError("Future GT timestamps do not match consecutive control steps")
+    errors = np.abs(timestamps[indices] - expected)
+    if errors.max() > tolerance:
+        raise ValueError(
+            f"Future GT timestamp error {errors.max():.6f}s exceeds {tolerance:.6f}s"
+        )
+    return indices, expected
+
+
+def tennis_action_metrics(predicted, gt_absolute, base_absolute):
+    """Compare physical relative poses with GT; rotations use SO(3) distance.
+
+    Position units follow the source dataset; Euler angles are radians.
+    Raw GT is intentionally not clipped to the model's training range.
+    """
+    from scipy.spatial.transform import Rotation
+    predicted = np.asarray(predicted, dtype=np.float64)
+    gt = np.asarray(gt_absolute, dtype=np.float64)[..., -6:]
+    base = np.asarray(base_absolute, dtype=np.float64)[-6:]
+    if predicted.ndim != 2 or predicted.shape != gt.shape or predicted.shape[1] != 6:
+        raise ValueError(f"Expected matched [T,6] poses, got {predicted.shape}, {gt.shape}")
+    if len(predicted) == 0 or not all(np.isfinite(x).all() for x in (predicted, gt, base)):
+        raise ValueError("Evaluation poses must be nonempty and finite")
+    gt_rotation = Rotation.from_euler("xyz", base[3:]).inv() * Rotation.from_euler("xyz", gt[:, 3:])
+    gt_relative = np.concatenate([gt[:, :3] - base[:3], gt_rotation.as_euler("xyz")], axis=1)
+    error = predicted - gt_relative
+    # Euler channel diagnostics wrap at +/- pi; geodesic error below is the
+    # representation-independent orientation metric.
+    error[:, 3:] = (error[:, 3:] + np.pi) % (2 * np.pi) - np.pi
+    position_error = np.linalg.norm(error[:, :3], axis=1)
+    angle_error = (gt_rotation.inv() * Rotation.from_euler("xyz", predicted[:, 3:])).magnitude()
+    metrics = {
+        "count": len(predicted),
+        "channel_names": ["x", "y", "z", "rx", "ry", "rz"],
+        "position_units": "dataset_position_units",
+        "rotation_units": "radians",
+        "gt_clipped": False,
+        "channel_mae": np.abs(error).mean(axis=0).tolist(),
+        "channel_rmse": np.sqrt(np.mean(error ** 2, axis=0)).tolist(),
+        "position_l2_mean": float(position_error.mean()),
+        "position_l2_rmse": float(np.sqrt(np.mean(position_error ** 2))),
+        "position_l2_final": float(position_error[-1]),
+        "rotation_geodesic_mean_rad": float(angle_error.mean()),
+        "rotation_geodesic_rmse_rad": float(np.sqrt(np.mean(angle_error ** 2))),
+        "rotation_geodesic_final_rad": float(angle_error[-1]),
+    }
+    return metrics, gt_relative, position_error, angle_error
+
+
 def tennis_pose(actions):
     """Select the trailing [x, y, z, rx, ry, rz] from dataset rows."""
     values = np.asarray(actions, dtype=np.float64)
@@ -394,6 +505,23 @@ def load_lerobot_episode(
 
 class VideoPrefixInference(VA_Server):
     """VGGT VA server extended with timestamp-sampled prefix inference."""
+
+    def preprocess_action(self, action):
+        if self.action_norm_method != 'quantiles':
+            raise NotImplementedError
+        action = np.asarray(action)
+        if action.ndim != 3:
+            raise ValueError(f"Expected actions [D,F,H], got {action.shape}")
+        channels, frames, controls = action.shape
+        values, _ = normalize_actions(
+            action.transpose(1, 2, 0).reshape(-1, channels),
+            self.job_config.inverse_used_action_channel_ids,
+            self.job_config.norm_stat['q01'],
+            self.job_config.norm_stat['q99'],
+        )
+        values = values.reshape(frames, controls, -1).transpose(2, 0, 1).copy()
+        return torch.from_numpy(values).unsqueeze(0).unsqueeze(-1)
+
 
     @torch.no_grad()
     def encode_video_prefix(
@@ -1260,37 +1388,6 @@ def make_pose_relative_to_first(pose: np.ndarray) -> np.ndarray:
     return np.concatenate([relative_translation, relative_rotation], axis=1)
 
 
-def make_pose_6d_relative_to_first(pose):
-    if torch.is_tensor(pose):
-        pose = pose.detach().cpu().numpy()
-
-    try:
-        from scipy.spatial.transform import Rotation
-    except ImportError as exc:
-        raise RuntimeError(
-            "RoboTwin action-prefix preparation requires scipy"
-        ) from exc
-
-    rot = Rotation.from_euler("xyz", pose[:, 3:6])
-    first_rot = Rotation.from_euler(
-        "xyz",
-        np.tile(pose[:1, 3:6], (pose.shape[0], 1)),
-    )
-
-    trans = pose[:, :3]
-    relative_trans = trans - trans[0:1]
-
-    relative_rot = first_rot.inv() * rot
-    relative_euler = relative_rot.as_euler("xyz")
-
-    relative_pose = np.concatenate(
-        [relative_trans, relative_euler],
-        axis=1,
-    )
-
-    return relative_pose
-
-
 def build_action_prefix(
     timestamps: np.ndarray,
     actions: np.ndarray,
@@ -1382,11 +1479,12 @@ def build_action_prefix(
                 f"Tennis action history must have at least 6 channels, "
                 f"got {actions.shape}"
             )
+        history = tennis_pose(history)
         if len(history):
-            history = make_pose_6d_relative_to_first(tennis_pose(history))
+            history = relative_pose_6d(history)
 
     zero_anchor = np.zeros(
-        (action_per_frame, history.shape[1] if len(history) else actions.shape[1]),
+        (action_per_frame, history.shape[1]),
         dtype=np.float64,
     )
     packed_time_major = np.concatenate([zero_anchor, history], axis=0)
@@ -1912,6 +2010,11 @@ def run(args: argparse.Namespace) -> None:
                 f"Transformer directory does not exist: {transformer_path}"
             )
         config.transformer_path = str(transformer_path)
+    if args.vggt_model_path is not None:
+        vggt_model_path = Path(args.vggt_model_path).expanduser().resolve()
+        if not vggt_model_path.is_file():
+            raise FileNotFoundError(f"VGGT checkpoint does not exist: {vggt_model_path}")
+        config.vggt_pretrained_model_name_or_path = str(vggt_model_path)
     if args.enable_offload is not None:
         config.enable_offload = args.enable_offload
 
@@ -1943,19 +2046,6 @@ def run(args: argparse.Namespace) -> None:
         f"known controls={action_prefix_metadata['known_source_action_count']}"
     )
 
-    torch.cuda.set_device(0)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
-
-    model = VideoPrefixInference(config)
-    prefix_obs, metadata = model.load_prefix_observations(
-        video_paths=video_paths,
-        camera_offsets=camera_offsets,
-        target_timestamps=target_timestamps,
-        timestamp_tolerance=args.timestamp_tolerance,
-        max_camera_skew=args.max_camera_skew,
-        rotate_clockwise_90=args.rotate_clockwise_90,
-    )
     future_latent_frames = None
     num_chunks = args.num_chunks
     if args.future_num_frames is not None:
@@ -1979,6 +2069,32 @@ def run(args: argparse.Namespace) -> None:
             f"{num_chunks} inference chunks"
         )
 
+    expected_future_frames = (
+        future_latent_frames if future_latent_frames is not None
+        else num_chunks * config.frame_chunk_size - 1
+    )
+    prediction_start_index = int(action_prefix_metadata["known_source_action_range"][1])
+    gt_indices, prediction_timestamps = match_future_actions(
+        action_timestamps, prediction_start_index,
+        expected_future_frames * config.action_per_frame,
+        dataset_metadata["dataset_fps"], args.timestamp_tolerance,
+    )
+    if not np.isfinite(episode_actions[gt_indices]).all():
+        raise ValueError("Future GT actions contain NaN or Inf")
+
+    torch.cuda.set_device(0)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+
+    model = VideoPrefixInference(config)
+    prefix_obs, metadata = model.load_prefix_observations(
+        video_paths=video_paths,
+        camera_offsets=camera_offsets,
+        target_timestamps=target_timestamps,
+        timestamp_tolerance=args.timestamp_tolerance,
+        max_camera_skew=args.max_camera_skew,
+        rotate_clockwise_90=args.rotate_clockwise_90,
+    )
     all_latents, all_vggt_latents, future_actions, prefix_latent_frames = (
         model.generate_from_video_prefix(
             prefix_obs=prefix_obs,
@@ -1992,30 +2108,43 @@ def run(args: argparse.Namespace) -> None:
     prediction_control_count = int(
         future_actions.shape[1] * future_actions.shape[2]
     )
-    prediction_start_index = int(
-        action_prefix_metadata["known_source_action_range"][1]
-    )
-    if prediction_start_index >= len(action_timestamps):
+    if prediction_control_count != len(gt_indices):
         raise RuntimeError(
-            f"Prediction starts at action row {prediction_start_index}, but "
-            f"episode contains only {len(action_timestamps)} rows"
+            f"Expected {len(gt_indices)} predicted controls, got {prediction_control_count}"
         )
-    prediction_timestamps = (
-        float(action_timestamps[prediction_start_index])
-        + np.arange(prediction_control_count, dtype=np.float64)
-        / dataset_metadata["dataset_fps"]
-    )
     action_prefix_metadata.update(
         {
             "prediction_start_action_index": prediction_start_index,
             "prediction_control_count": prediction_control_count,
             "prediction_action_timestamps": prediction_timestamps.tolist(),
+            "gt_action_indices": gt_indices.tolist(),
+            "gt_action_timestamps": action_timestamps[gt_indices].tolist(),
+            "max_gt_timestamp_error_sec": float(np.max(np.abs(
+                action_timestamps[gt_indices] - prediction_timestamps
+            ))),
         }
     )
+
+    evaluation = {}
+    action_metrics = None
+    if config.env_type == "tennis_tshape":
+        action_metrics, gt_relative, position_errors, rotation_errors = tennis_action_metrics(
+            flatten_predicted_actions(future_actions), episode_actions[gt_indices],
+            action_prefix_metadata["relative_pose_base_action"],
+        )
+        evaluation = {
+            "gt_relative_actions": torch.from_numpy(gt_relative),
+            "position_l2_errors": torch.from_numpy(position_errors),
+            "rotation_geodesic_errors_rad": torch.from_numpy(rotation_errors),
+        }
+        logger.info(f"Time-aligned action metrics: {json.dumps(action_metrics)}")
 
     torch.save(
         {
             "actions": future_actions,
+            "action_metrics": action_metrics,
+            "evaluation": evaluation,
+            "gt_actions": torch.from_numpy(episode_actions[gt_indices]),
             "input_actions": torch.from_numpy(prefix_actions),
             "action_prefix_metadata": action_prefix_metadata,
             "prefix_latent_frames": prefix_latent_frames,
@@ -2045,6 +2174,7 @@ def run(args: argparse.Namespace) -> None:
     metadata.update(
         {
             "config_name": args.config_name,
+            "action_metrics": action_metrics,
             "transformer_path": getattr(config, "transformer_path", None),
             "vggt_model_path": config.vggt_pretrained_model_name_or_path,
             "prompt": prompt,
