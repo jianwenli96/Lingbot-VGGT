@@ -19,7 +19,6 @@ from diffusers.utils import export_to_video
 from utils import init_logger, logger
 
 VAE_TEMPORAL_FACTOR = 4
-PREFIX_NUM_RGB_FRAMES = 9
 
 
 def _unpack_ndarray(value, name):
@@ -35,14 +34,17 @@ def _unpack_ndarray(value, name):
 
 
 def _prefix_from_message(message, camera_keys):
+    frame_count = len(message.get("obs_frames", []))
+    if frame_count < 2:
+        raise ValueError("obs_frames must contain at least two frames")
     images = {
         name: _unpack_ndarray(message[f"observation.images.{name}"], name)
         for name in ("left", "right", "upper")
     }
     for name, image in images.items():
-        if image.ndim != 4 or image.shape[0] != PREFIX_NUM_RGB_FRAMES \
+        if image.ndim != 4 or image.shape[0] != frame_count \
                 or image.shape[-1] != 3 or image.dtype != np.uint8:
-            raise ValueError(f"observation.images.{name} must be uint8 [{PREFIX_NUM_RGB_FRAMES},H,W,3], got {image.shape} {image.dtype}")
+            raise ValueError(f"observation.images.{name} must be uint8 [{frame_count},H,W,3], got {image.shape} {image.dtype}")
     return {"obs": [
         {
             key: np.ascontiguousarray(
@@ -50,7 +52,7 @@ def _prefix_from_message(message, camera_keys):
             )
             for key in camera_keys
         }
-        for index in range(PREFIX_NUM_RGB_FRAMES)
+        for index in range(frame_count)
     ]}
 
 
@@ -61,12 +63,13 @@ def infer_request(model, message, instruction, future_num_frames,
         raise ValueError("Request must contain episode and request_id")
     if model.job_config.env_type != "tennis_tshape":
         raise ValueError("This server requires a tennis_tshape checkpoint")
-    if len(message.get("obs_frames", [])) != PREFIX_NUM_RGB_FRAMES:
-        raise ValueError(f"Expected exactly {PREFIX_NUM_RGB_FRAMES} obs_frames")
+    frame_count = len(message.get("obs_frames", []))
+    if frame_count < 2:
+        raise ValueError("Expected at least two obs_frames")
     if future_num_frames <= 0 or future_num_frames % VAE_TEMPORAL_FACTOR:
         raise ValueError(f"future_num_frames must be a positive multiple of {VAE_TEMPORAL_FACTOR}")
     prefix_obs = _prefix_from_message(message, list(model.job_config.obs_cam_keys))
-    latent_prefix_frames = (PREFIX_NUM_RGB_FRAMES - 1) // VAE_TEMPORAL_FACTOR + 1
+    latent_prefix_frames = (frame_count - 1) // VAE_TEMPORAL_FACTOR + 1
     prefix_actions = np.zeros((len(model.job_config.used_action_channel_ids), latent_prefix_frames,
                                model.job_config.action_per_frame), dtype=np.float32)
     future_latent_frames = future_num_frames // VAE_TEMPORAL_FACTOR
@@ -82,9 +85,13 @@ def infer_request(model, message, instruction, future_num_frames,
     targets = flatten_predicted_actions(predicted)
     if not np.isfinite(targets).all():
         raise ValueError("Model returned NaN or Inf actions")
-    # Model outputs cumulative offsets; the simulator consumes per-step deltas.
+    # Model outputs cumulative pose offsets.  The Isaac Sim client consumes a
+    # chunk as one endpoint command: it takes the final row and adds that
+    # offset to the latest observed link6 pose before running IK.  Do not
+    # apply np.diff() here: converting the cumulative sequence to per-step
+    # increments would make the client's final-row selection use only the
+    # last incremental step.
     targets[:, 2] = np.unwrap(targets[:, 2])
-    deltas = np.diff(targets, axis=0, prepend=np.zeros((1, 9), dtype=targets.dtype))
     if video_output_dir is not None:
         video_dir = Path(video_output_dir) / f"episode-{int(message['episode']):06d}"
         video_dir.mkdir(parents=True, exist_ok=True)
@@ -92,19 +99,19 @@ def infer_request(model, message, instruction, future_num_frames,
         decoded_video = model.decode_one_video(all_latents.to(model.device), "np")[0]
         export_to_video(decoded_video, str(video_path), fps=float(output_fps))
         logger.info("Saved inference video to %s", video_path)
-    logger.info("episode=%s request=%s: inferred %d delta actions in %.1f ms",
-                message["episode"], message["request_id"], len(deltas),
+    logger.info("episode=%s request=%s: inferred %d cumulative delta actions in %.1f ms",
+                message["episode"], message["request_id"], len(targets),
                 (time.perf_counter() - start) * 1000)
     return {"episode": int(message["episode"]), "request_id": int(message["request_id"]),
-            "action_mode": "delta", "actions": deltas.astype(np.float32).tolist()}
+            "action_mode": "delta", "actions": targets.astype(np.float32).tolist()}
 
 
 def load_model(args):
     config = copy.deepcopy(VA_CONFIGS[args.config_name])
     if config.env_type != "tennis_tshape":
         raise ValueError(f"Config {args.config_name!r} is not a tennis checkpoint")
-    if config.action_per_frame != 8 or list(config.used_action_channel_ids) != list(range(9)):
-        raise ValueError("Checkpoint must use action_per_frame=8 and channels 0:9")
+    if config.action_per_frame != 8 or len(config.used_action_channel_ids) != 6:
+        raise ValueError("Checkpoint must use action_per_frame=8 and six tennis pose channels")
     config.rank = config.local_rank = 0
     config.world_size = 1
     config.save_root = str(Path(args.save_root).resolve())

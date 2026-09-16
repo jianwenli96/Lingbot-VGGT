@@ -94,9 +94,8 @@ ARM_BASE_CAMERA_PATHS = (
 )
 EXTRA_ARM_BASE_CAMERA_PATH = "/World/CatchIt/base_link/arm_base/obs_camera"
 NDARRAY_WIRE_MARKER = "__ndarray_raw_v1__"
-# The Isaac Sim client accepts action chunks of variable temporal length.  The
-# WAM protocol still requires nine delta channels per action.
-INFERENCE_DELTA_STEPS = None
+INFERENCE_POSE_STEPS = 20
+INFERENCE_POSE_DIM = 6
 # Default arm initial pose in radians.
 ARM_HOME_RAD = (0.0, -0.35, -0.44, 0.0, -0.79, 1.57)
 # Match patch_usd_physics_from_mjcf.py and the MJCF arm actuator limits.
@@ -371,8 +370,6 @@ def _parse_args():
                         "every N frames in each episode. 0 disables. Default: 10.")
     parser.add_argument("--max-steps", type=int, default=0, metavar="N",
                         help="Exit after N update-loop steps. 0 runs until closed.")
-    parser.add_argument("--max-episodes", "--max_episodes", type=int, default=100,
-                        metavar="N", help="Exit after N completed throw episodes.")
     parser.add_argument("--seed", type=int, default=0,
                         help="Random seed for tennis-ball throws.")
     parser.add_argument("--physics_dt", type=float, default=0.0333333,
@@ -380,7 +377,7 @@ def _parse_args():
     parser.add_argument("--ball-distance", type=float, default=4.0,
                         help="Launch-disk center distance in front of base_link (metres).")
     parser.add_argument("--ball-distance-range", type=float, default=1.0,
-                        help="Half-length of the uniform launch line along the forward axis.")
+                        help="Radius of the uniform launch-point disk in metres.")
     parser.add_argument("--ball-height-range", nargs=2, type=float,
                         default=(0.81, 1.0), metavar=("MIN", "MAX"),
                         help="Launch world-Z range in metres.")
@@ -393,8 +390,8 @@ def _parse_args():
                         help="Landing-point radius around base_link.")
     parser.add_argument("--ball-landing-forward-min", type=float, default=0.3,
                         help="Minimum forward coordinate of the landing point.")
-    parser.add_argument("--ball-landing-lateral-max", type=float, default=1.4,
-                        help="Maximum absolute lateral coordinate; values up to the landing radius are unrestricted.")
+    parser.add_argument("--ball-landing-lateral-max", type=float, default=0.7,
+                        help="Maximum absolute lateral coordinate of the landing point.")
     parser.add_argument("--throw-period", type=float, default=2.0,
                         help="Seconds between automatic rethrows. 0 throws once.")
     parser.add_argument("--hide-throw-markers", action="store_true",
@@ -404,10 +401,10 @@ def _parse_args():
                         "the base is locked before this step.")
     parser.add_argument("--arm-move-steps", type=int, default=20,
                         help="Number of steps used to interpolate from home to the IK solution.")
-    parser.add_argument("--base-landing-share", type=float, default=0.7,
+    parser.add_argument("--base-landing-share", type=float, default=0.8,
                         help="Fraction of landing-target X/Y displacement assigned to "
-                             "base translation; the arm handles the remainder and all Z. "
-                             "Must be in [0, 1]. Default: 0.7.")
+                        "base translation; the arm handles the remainder and all Z. "
+                        "Must be in [0, 1]. Default: 0.8.")
     parser.add_argument("--linear-speed", type=float, default=0.25,
                         help="W/S kinematic base speed in metres/second.")
     parser.add_argument("--turn-speed", type=float, default=0.6,
@@ -461,15 +458,13 @@ def _parse_args():
     parser.add_argument("--record-depth", action="store_true",
                         help="Record per-camera distance-to-image-plane depth in metres.")
     parser.add_argument("--inference-control", action="store_true",
-                        help="Drive the base and arm exclusively from 9-D VLA actions over ZeroMQ.")
+                        help="Receive 6-D link6 poses over ZeroMQ and drive the arm via IK.")
     parser.add_argument("--zmq-host", default="127.0.0.1")
     parser.add_argument("--zmq-observation-port", type=int, default=5563)
     parser.add_argument("--zmq-action-port", type=int, default=5564)
     parser.add_argument("--inference-frame-offsets", nargs="+", type=int,
-                        default=tuple(range(0, 17, 2)), metavar="FRAME",
-                        help="Absolute episode frame numbers used as input. "
-                        "The default matches isaacsim_evaluate_tennis.py: "
-                        "0,2,4,...,16 (nine RGB frames).")
+                        default=tuple(range(0, 25, 2)), metavar="FRAME",
+                        help="Absolute episode frame numbers used as input.")
     parser.add_argument("--inference-replan-steps", type=int, default=20,
                         help="Request a new action chunk after this many executed actions.")
     parser.add_argument(
@@ -479,8 +474,15 @@ def _parse_args():
     )
     parser.add_argument("--inference-timeout", type=float, default=30.0,
                         help="Seconds to wait for each inference response.")
-    parser.add_argument("--catch-radius", type=float, default=0.13,
-                        help="Maximum ball-to-ring-center distance counted as a catch (m).")
+    parser.add_argument("--inference-eval-episodes", type=int, default=100,
+                        help="Number of episodes used for catch-success evaluation.")
+    parser.add_argument("--inference-success-distance", type=float, default=0.15,
+                        help="Strict link6-control-point distance threshold in metres.")
+    parser.add_argument(
+        "--inference-eval-output-dir",
+        default=str(Path(__file__).resolve().parents[1] / "data/inference_evaluation"),
+        help="Directory for catch-success statistics JSON.",
+    )
     parser.add_argument(
         "--inference-save-inputs", action="store_true",
         help="Save a 3x3 input grid and observation-camera episode video.",
@@ -554,8 +556,6 @@ def _validate_inputs(args):
         raise SystemExit("[ERROR] --plate-size values must be positive")
     if int(args.max_steps) < 0:
         raise SystemExit("[ERROR] --max-steps must be non-negative")
-    if int(args.max_episodes) <= 0:
-        raise SystemExit("[ERROR] --max-episodes must be positive")
     if int(args.print_camera_extrinsics) < 0:
         raise SystemExit("[ERROR] --print-camera-extrinsics must be non-negative")
     if args.camera_width <= 0 or args.camera_height <= 0:
@@ -589,8 +589,6 @@ def _validate_inputs(args):
         raise SystemExit("[ERROR] --ball-target-height must be positive")
     if args.throw_period < 0.0:
         raise SystemExit("[ERROR] --throw-period must be non-negative")
-    if args.catch_radius < 0.0:
-        raise SystemExit("[ERROR] --catch-radius must be non-negative")
     if args.physics_dt <= 0.0:
         raise SystemExit("[ERROR] --physics_dt must be positive")
     if args.arm_start_step < 0 or args.arm_move_steps <= 0:
@@ -599,6 +597,10 @@ def _validate_inputs(args):
         raise SystemExit("[ERROR] --base-landing-share must be in [0, 1]")
     if args.dataset_num_episodes <= 0:
         raise SystemExit("[ERROR] --dataset-num-episodes must be positive")
+    if args.inference_eval_episodes <= 0:
+        raise SystemExit("[ERROR] --inference-eval-episodes must be positive")
+    if args.inference_success_distance <= 0.0:
+        raise SystemExit("[ERROR] --inference-success-distance must be positive")
     if args.throw_analysis_interval <= 0:
         raise SystemExit("[ERROR] --throw-analysis-interval must be positive")
     if not args.dataset_task.strip():
@@ -2110,8 +2112,109 @@ class _LeRobotRecorder:
                 pass
 
 
+class _InferenceCatchEvaluator:
+    """Count one catch result per throw using the landing-height crossing."""
+
+    def __init__(self, args):
+        self.limit = int(args.inference_eval_episodes)
+        self.threshold = float(args.inference_success_distance)
+        self.output_dir = Path(args.inference_eval_output_dir).expanduser().resolve()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.records = []
+        self.active = None
+
+    @property
+    def complete(self):
+        return len(self.records) >= self.limit
+
+    def begin_episode(self, episode, landing):
+        self.active = {
+            "episode": int(episode),
+            "target_point_world_m": np.asarray(landing, dtype=np.float64).tolist(),
+            "distance_at_target_height_m": None,
+            "target_height_step": None,
+            "previous_ball": None,
+            "previous_link6": None,
+        }
+
+    @staticmethod
+    def _control_point(articulation, base_index, link6_index):
+        poses = articulation.data.body_pose_w.torch
+        base = poses[0, base_index].detach().cpu().numpy()
+        link6 = poses[0, link6_index].detach().cpu().numpy()
+        transform = _LeRobotRecorder._pose_matrix_from_xyzw(base[:3], base[3:])
+        return link6[:3] + transform[:3, :3] @ np.array([0.0, 0.10, 0.025])
+
+    def observe(self, episode, step, articulation, base_index, link6_index, ball):
+        if (self.active is None or self.active["episode"] != int(episode)
+                or link6_index is None):
+            return
+        current_ball = ball.data.root_com_pos_w.torch[0].detach().cpu().numpy().astype(np.float64)
+        current_control = self._control_point(articulation, base_index, link6_index)
+        previous_ball = self.active["previous_ball"]
+        previous_control = self.active["previous_link6"]
+        self.active["previous_ball"] = current_ball
+        self.active["previous_link6"] = current_control
+        if previous_ball is None or previous_control is None:
+            return
+        target = np.asarray(self.active["target_point_world_m"], dtype=np.float64)
+        dz = current_ball[2] - previous_ball[2]
+        if abs(dz) <= 1.0e-12:
+            return
+        alpha = (target[2] - previous_ball[2]) / dz
+        if not 0.0 <= alpha <= 1.0:
+            return
+        if current_ball[2] >= previous_ball[2] and self.active["distance_at_target_height_m"] is not None:
+            return
+        control_at_height = previous_control + alpha * (current_control - previous_control)
+        self.active["distance_at_target_height_m"] = float(np.linalg.norm(control_at_height - target))
+        self.active["target_height_step"] = float(step - 1 + alpha)
+
+    def finish_episode(self, episode):
+        if self.active is None or self.active["episode"] != int(episode):
+            return None
+        distance = self.active["distance_at_target_height_m"]
+        result = {
+            "episode": int(episode),
+            "target_point_world_m": self.active["target_point_world_m"],
+            "target_height_m": self.active["target_point_world_m"][2],
+            "target_height_step": self.active["target_height_step"],
+            "distance_at_target_height_m": distance,
+            "success": bool(distance is not None and distance < self.threshold),
+        }
+        self.records.append(result)
+        self.active = None
+        success_count = sum(item["success"] for item in self.records)
+        summary = {
+            "metric": "distance between link6 control point and landing point at ball landing height",
+            "success_threshold_m": self.threshold,
+            "completed_episodes": len(self.records),
+            "success_count": success_count,
+            "failure_count": len(self.records) - success_count,
+            "success_rate": success_count / len(self.records),
+            "episodes": self.records,
+        }
+        output = self.output_dir / "inference_catch_statistics.json"
+        temporary = output.with_name(f".{output.name}.tmp")
+        temporary.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(output)
+        print(
+            f"[CATCH-EVAL] episode={episode} distance="
+            f"{distance if distance is not None else 'N/A'} "
+            f"success={result['success']} rate={success_count}/{len(self.records)} "
+            f"({100.0 * summary['success_rate']:.2f}%)",
+            flush=True,
+        )
+        return result
+
+    def finalize(self):
+        # Do not count an interrupted or timed-out episode as a completed
+        # experiment. Only a normal throw-period boundary calls finish_episode.
+        self.active = None
+
+
 class _VLAInferenceBridge:
-    """Exchange synchronized observations and 9-D action chunks over ZeroMQ."""
+    """Exchange synchronized observations and 6-D end-effector poses over ZeroMQ."""
 
     CAMERA_NAMES = ("left", "right", "upper")
 
@@ -2132,6 +2235,8 @@ class _VLAInferenceBridge:
         self.request_id = 0
         self.awaiting_action = False
         self.pending_since = None
+        self.latest_link6_pose = None
+        self.latest_action_delta = None
         self.input_save_executor = (
             ThreadPoolExecutor(max_workers=1, thread_name_prefix="vla-input-writer")
             if args.inference_save_inputs else None
@@ -2176,19 +2281,16 @@ class _VLAInferenceBridge:
         return np.array(image[:, :, :3], dtype=np.uint8, order="C", copy=True)
 
     @staticmethod
-    def _state(articulation, arm_indices, base_body_index):
-        base_pose = articulation.data.body_pose_w.torch[
-            0, base_body_index
+    def _state(articulation, link6_body_index):
+        """Return the world-frame 6D pose of the arm's link6 body."""
+        if link6_body_index is None:
+            raise RuntimeError("Cannot capture inference state: body 'link6' is missing")
+        pose = articulation.data.body_pose_w.torch[
+            0, link6_body_index
         ].detach().cpu().numpy()
-        joint_pos = articulation.data.joint_pos
-        joint_pos = getattr(joint_pos, "torch", joint_pos)
-        joints = joint_pos[0, arm_indices].detach().cpu().numpy()
         return np.concatenate((
-            np.asarray([
-                base_pose[0], base_pose[1],
-                _LeRobotRecorder._yaw_from_xyzw(base_pose[3:]),
-            ], dtype=np.float32),
-            np.asarray(joints, dtype=np.float32),
+            np.asarray(pose[:3], dtype=np.float32),
+            _LeRobotRecorder._rpy_from_xyzw(pose[3:]).astype(np.float32),
         )).astype(np.float32)
 
     def reset_episode(self):
@@ -2199,24 +2301,30 @@ class _VLAInferenceBridge:
         self.last_action_request_key = None
         self.awaiting_action = False
         self.pending_since = None
+        self.latest_link6_pose = None
+        self.latest_action_delta = None
 
     @property
     def control_ready(self):
         """Allow robot control only after this episode published an observation."""
         return self.published_this_episode
 
-    def capture(self, episode, episode_step, articulation, arm_indices, base_body_index):
+    def capture(self, episode, episode_step, articulation, link6_body_index):
         self._reap_input_saves()
         self._receive_actions(episode)
         if episode_step in self.frame_index_set:
             self.history[int(episode_step)] = {
                 "step": int(episode_step),
-                "state": self._state(articulation, arm_indices, base_body_index),
+                "state": self._state(articulation, link6_body_index),
                 "images": {
                     name: self._rgb(annotator)
                     for name, annotator in zip(self.CAMERA_NAMES, self.rgb_annotators)
                 },
             }
+            # The current frame is the newest observed pose.  ``selected`` is
+            # only constructed later when a request is published, so using it
+            # here causes an UnboundLocalError on the first captured frame.
+            self.latest_link6_pose = self.history[int(episode_step)]["state"].copy()
         if episode_step < self.inference_start_step:
             return
         needs_plan = (
@@ -2320,9 +2428,14 @@ class _VLAInferenceBridge:
                 message = self.action_socket.recv_pyobj(flags=zmq.NOBLOCK)
                 if not isinstance(message, dict) or "actions" not in message:
                     continue
+                message_episode = int(message.get("episode", episode))
+                message_request = message.get("request_id")
+                # Older WAM publishers identify only the episode.  Bind such
+                # messages to the currently outstanding request; newer
+                # publishers can still use the stricter request-id match.
                 request_key = (
-                    int(message.get("episode", episode)),
-                    int(message.get("request_id", -1)),
+                    message_episode,
+                    self.request_id if message_request is None else int(message_request),
                 )
                 if request_key == expected_request_key:
                     latest = message
@@ -2330,51 +2443,60 @@ class _VLAInferenceBridge:
             pass
         if latest is None:
             return
-        if latest.get("action_mode") != "delta":
-            raise RuntimeError(
-                "Expected inference response action_mode='delta', got "
-                f"{latest.get('action_mode')!r}"
-            )
         actions = np.asarray(latest["actions"], dtype=np.float32)
-        if actions.ndim != 2 or actions.shape[0] <= 0 or actions.shape[1] != 9:
+        if actions.ndim == 1:
+            actions = actions.reshape(1, -1)
+        if actions.ndim != 2 or actions.shape[1] not in (6, 8):
             raise RuntimeError(
-                "Expected VLA delta actions shaped (N, 9), with N > 0; got "
-                f"{actions.shape}"
+                "Expected VLA pose actions shaped (N, 6) [xyz+rpy] or "
+                f"(N, 8) [xyz+quat+gripper], got {actions.shape}"
             )
+        if not np.isfinite(actions).all():
+            raise RuntimeError("VLA pose actions contain non-finite values")
+        # WAM inference historically publishes [xyz, quat_xyzw, gripper].
+        # Convert that wire form to the six-dimensional [xyz, rpy] target.
+        if actions.shape[1] == 8:
+            converted = np.empty((len(actions), INFERENCE_POSE_DIM), dtype=np.float32)
+            converted[:, :3] = actions[:, :3]
+            for row, quat in enumerate(actions[:, 3:7]):
+                converted[row, 3:] = _LeRobotRecorder._rpy_from_xyzw(quat)
+            actions = converted
+        # A complete chunk is represented by its final target.  The arm motion
+        # controller solves IK once and interpolates from the current pose to
+        # this endpoint over INFERENCE_POSE_STEPS physics frames.
+        endpoint = actions[-1].copy()
+        # Server responses are deltas in the link6 world-frame pose. Convert
+        # the final delta to an absolute target for the existing IK solver.
+        if latest.get("action_mode", "delta") == "delta":
+            if self.latest_link6_pose is None:
+                raise RuntimeError("Cannot apply delta action without a link6 reference pose")
+            endpoint = self.latest_link6_pose + endpoint
+            self.latest_action_delta = actions[-1].copy()
+        else:
+            self.latest_action_delta = None
         request_key = (
             int(latest.get("episode", episode)),
-            int(latest.get("request_id", -1)),
+            self.request_id if latest.get("request_id") is None
+            else int(latest["request_id"]),
         )
         if request_key == self.last_action_request_key:
             return
         self.last_action_request_key = request_key
-        self.action_queue = deque(actions)
+        self.action_queue = deque([endpoint])
         self.executed_since_plan = 0
         self.awaiting_action = False
         self.pending_since = None
         print(
-            "[VLA] Received delta actions "
+            "[VLA] Received 6-D target pose "
             f"episode={request_key[0]} request={request_key[1]} "
             f"source_action_index={latest.get('source_action_index', '?')} "
-            "columns=[dx, dy, dyaw, dj1, dj2, dj3, dj4, dj5, dj6]:\n"
-            + np.array2string(
-                actions,
-                precision=6,
-                suppress_small=False,
-                floatmode="fixed",
-                max_line_width=200,
-            ),
+            "columns=[x, y, z, roll, pitch, yaw]:\n"
+            + np.array2string(endpoint, precision=6, suppress_small=False,
+                              floatmode="fixed", max_line_width=200),
             flush=True,
         )
         print(
-            "[VLA] Five-step accumulated delta: "
-            + np.array2string(
-                actions.sum(axis=0, dtype=np.float64),
-                precision=6,
-                suppress_small=False,
-                floatmode="fixed",
-                max_line_width=200,
-            ),
+            f"[VLA] IK interpolation: {INFERENCE_POSE_STEPS} physics steps",
             flush=True,
         )
 
@@ -2839,6 +2961,9 @@ class _ArmHoldController:
 
     def drive_base(self, forward_speed, yaw_rate, dt):
         """Move the articulation root along CatchIt's local +Y direction."""
+        # Preserve the corrected PhysX root pose during an idle/response hold.
+        if abs(float(forward_speed)) <= 1e-12 and abs(float(yaw_rate)) <= 1e-12:
+            return
         self.root_yaw += float(yaw_rate) * float(dt)
         c, s = math.cos(self.root_yaw), math.sin(self.root_yaw)
         self.root_pose[0, 0] += -s * float(forward_speed) * float(dt)
@@ -2985,16 +3110,138 @@ class _LandingArmMotion:
         arm_xml = Path(SCENE_ASSET_ROOT) / "assets/urdf/xarm6_right.xml"
         self.model = mujoco.MjModel.from_xml_path(str(arm_xml))
         self.data = mujoco.MjData(self.model)
-        # The control point starts at link6, but this offset is expressed in
-        # the fixed base_link/arm-base axes rather than the rotating link6 axes.
+        # Landing collection uses a point offset from link6 in fixed base axes.
+        # Inference pose targets instead refer to the link6 origin itself.
         self.base_oriented_target_offset = np.array(
             [0.0, 0.10, 0.025], dtype=np.float64
         )
         self.data.qpos[:6] = self.home
         self._mujoco.mj_fwdPosition(self.model, self.data)
         self.home_link6_rotation = self.data.body("link6").xmat.reshape(3, 3).copy()
+        self.home_link6_pos = self.data.body("link6").xpos.copy()
         self.home_control_pos = (
-            self.data.body("link6").xpos.copy() + self.base_oriented_target_offset
+            self.home_link6_pos + self.base_oriented_target_offset
+        )
+        self.inference_solution = None
+        self.inference_start = None
+        self.inference_step = 0
+
+    def reset_inference(self):
+        """Discard any target trajectory left from the previous episode."""
+        self.inference_solution = None
+        self.inference_start = None
+        self.inference_step = 0
+        self.base_translation_world_xy.fill(0.0)
+
+    def solve_pose(self, pose_world, allocation_delta=None):
+        """Solve a world-frame link6 pose ``[x, y, z, roll, pitch, yaw]``."""
+        pose_world = np.asarray(pose_world, dtype=np.float64).reshape(-1)
+        if pose_world.shape != (INFERENCE_POSE_DIM,) or not np.isfinite(pose_world).all():
+            raise ValueError(
+                f"Expected finite 6-D world pose [xyz+rpy], got {pose_world.shape}"
+            )
+        yaw = math.radians(float(self.args.robot_rotate[2]))
+        c, s = math.cos(yaw), math.sin(yaw)
+        rot_world_arm = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+        local_arm_base_offset = np.array([0.0, 0.115864, 0.4038])
+        robot_translation = np.asarray(self.args.robot_translate, dtype=np.float64)
+        arm_base_world = robot_translation + rot_world_arm @ local_arm_base_offset
+        arm_control_target = rot_world_arm.T @ (pose_world[:3] - arm_base_world)
+        # Preserve the collection strategy: the mobile base carries the
+        # configured share of horizontal displacement, while the arm carries
+        # the remainder of XY and all Z displacement.
+        if allocation_delta is None:
+            horizontal_delta_arm = arm_control_target[:2] - self.home_link6_pos[:2]
+        else:
+            # Allocate the commanded increment itself (in the link6/world
+            # command frame), before forming the absolute IK target.
+            horizontal_delta_world = np.asarray(allocation_delta, dtype=np.float64)[:2]
+            horizontal_delta_arm = rot_world_arm[:2, :2].T @ horizontal_delta_world
+        base_translation_arm = (
+            float(self.args.base_landing_share) * horizontal_delta_arm
+        )
+        arm_control_target[:2] -= base_translation_arm
+        self.base_translation_world_xy = (
+            rot_world_arm[:2, :2] @ base_translation_arm
+        )
+        target_rotation_arm = rot_world_arm.T @ self._Rotation.from_euler(
+            "xyz", pose_world[3:]
+        ).as_matrix()
+
+        def link6_pose(q):
+            self.data.qpos[:6] = q
+            self._mujoco.mj_fwdPosition(self.model, self.data)
+            link6_pos = self.data.body("link6").xpos.copy()
+            link6_rot = self.data.body("link6").xmat.reshape(3, 3).copy()
+            return link6_pos, link6_rot
+
+        def residual(q):
+            link6_pos, link6_rot = link6_pose(q)
+            orientation_error = self._Rotation.from_matrix(
+                target_rotation_arm.T @ link6_rot
+            ).as_rotvec()
+            return np.concatenate(
+                (20.0 * (link6_pos - arm_control_target),
+                 5.0 * orientation_error,
+                 0.01 * (q - self.home))
+            )
+
+        lower = self.model.jnt_range[:6, 0].copy()
+        upper = self.model.jnt_range[:6, 1].copy()
+        unlimited = np.logical_not(self.model.jnt_limited[:6].astype(bool))
+        lower[unlimited], upper[unlimited] = -2.0 * math.pi, 2.0 * math.pi
+        result = self._least_squares(
+            residual, np.clip(self.home, lower, upper), bounds=(lower, upper),
+            max_nfev=300, ftol=1.0e-10, xtol=1.0e-10, gtol=1.0e-10,
+        )
+        solution = np.asarray(result.x, dtype=np.float64).reshape(6)
+        achieved_pos, achieved_rot = link6_pose(solution)
+        position_error = float(np.linalg.norm(achieved_pos - arm_control_target))
+        orientation_error = float(np.linalg.norm(
+            self._Rotation.from_matrix(target_rotation_arm.T @ achieved_rot).as_rotvec()
+        ))
+        if (not result.success or not np.all(np.isfinite(solution))
+                or position_error > 0.015
+                or orientation_error > math.radians(0.5)):
+            raise RuntimeError(
+                f"6-D pose IK failed: position_error={position_error:.5f}m "
+                f"orientation_error={math.degrees(orientation_error):.4f}deg"
+            )
+        self.solution = solution
+        print(
+            "[ARM-IK] received world pose=%s base_xy_share=%.2f "
+            "base_xy_delta=%s position_error=%.5fm "
+            "orientation_error=%.4fdeg solution=%s"
+            % (tuple(round(float(v), 4) for v in pose_world),
+               float(self.args.base_landing_share),
+               tuple(round(float(v), 4) for v in self.base_translation_world_xy),
+               position_error,
+               math.degrees(orientation_error),
+               tuple(round(float(v), 4) for v in solution)),
+            flush=True,
+        )
+        return solution
+
+    def start_inference_pose(self, pose_world, current_joints, allocation_delta=None):
+        """Solve one target pose and prepare a smooth 20-step joint trajectory."""
+        self.inference_start = np.asarray(current_joints, dtype=np.float64).reshape(6).copy()
+        self.inference_solution = self.solve_pose(
+            pose_world, allocation_delta=allocation_delta
+        ).copy()
+        self.inference_step = 0
+
+    def update_inference(self):
+        """Advance the active inference trajectory by one physics step."""
+        if self.inference_solution is None or self.inference_start is None:
+            return
+        self.inference_step += 1
+        progress = min(1.0, self.inference_step / float(INFERENCE_POSE_STEPS))
+        alpha = progress * progress * (3.0 - 2.0 * progress)
+        self.controller.set_automatic_base_offset_xy(
+            alpha * self.base_translation_world_xy
+        )
+        self.controller.set_arm_position(
+            self.inference_start + alpha * (self.inference_solution - self.inference_start)
         )
 
     def solve_landing(self, landing_world):
@@ -3137,10 +3384,9 @@ def _format_joint_line(step, measured, target):
 def _sample_ball_throw(args, rng):
     """Sample the WAM point-to-point throw in the base_link frame.
 
-    CatchIt's local +Y is forward. The launch point is sampled uniformly on a
-    line centered ``ball_distance`` metres in front of the base, extending
-    ``ball_distance_range`` metres forward and backward, with zero lateral
-    offset. The landing point is sampled in the configured landing disk,
+    CatchIt's local +Y is forward. The launch point is sampled uniformly in a
+    disk centered ``ball_distance`` metres in front of the base, with radius
+    ``ball_distance_range``. The landing point is sampled in the configured landing disk,
     clipped by the minimum forward and maximum absolute lateral coordinates,
     at --ball-target-height. Flight time is quantized to physics steps and
     velocity matches semi-implicit integration.
@@ -3155,10 +3401,10 @@ def _sample_ball_throw(args, rng):
     forward = np.array([-math.sin(yaw), math.cos(yaw)], dtype=np.float64)
     lateral = np.array([math.cos(yaw), math.sin(yaw)], dtype=np.float64)
 
-    launch_forward = args.ball_distance + rng.uniform(
-        -args.ball_distance_range, args.ball_distance_range
-    )
-    launch_lateral = 0.0
+    launch_radius = args.ball_distance_range * math.sqrt(float(rng.random()))
+    launch_angle = rng.uniform(0.0, 2.0 * math.pi)
+    launch_forward = args.ball_distance + launch_radius * math.cos(launch_angle)
+    launch_lateral = launch_radius * math.sin(launch_angle)
     height = rng.uniform(*args.ball_height_range)
     launch_xy = base[:2] + launch_forward * forward + launch_lateral * lateral
     launch = np.array([*launch_xy, height], dtype=np.float64)
@@ -3336,6 +3582,7 @@ def _reset_throw_episode(
     articulation.reset()
     tennis_ball.reset()
     controller.reset_episode()
+    arm_motion.reset_inference()
     articulation.write_data_to_sim()
     if args.inference_control:
         launch, landing, flight_steps = _throw_ball(tennis_ball, args, rng)
@@ -3358,8 +3605,8 @@ def _reset_throw_episode(
     return launch, landing, flight_steps
 
 
-def _update_inference_controller(inference_bridge, controller, episode):
-    """Hold the collection pose until the first observation is published."""
+def _update_inference_controller(inference_bridge, controller, arm_motion, episode):
+    """Hold the collection pose until a matching inference response arrives."""
     if not inference_bridge.control_ready:
         # Match _LandingArmMotion.update() during the collection prefix. The
         # regular controller.apply() calls below perform the static pose hold.
@@ -3367,9 +3614,19 @@ def _update_inference_controller(inference_bridge, controller, episode):
         controller.set_home()
         return
     inference_bridge.poll_actions(episode)
-    predicted_action = inference_bridge.pop_action()
-    if predicted_action is not None:
-        controller.apply_inference_delta(predicted_action)
+    # Poll for responses/timeouts, but never advance a trajectory while physics
+    # is frozen. The first request retains home; later requests retain their
+    # observation pose so the response's reference frame stays valid.
+    if inference_bridge.awaiting_action:
+        return
+    predicted_pose = inference_bridge.pop_action()
+    if predicted_pose is not None:
+        current = controller.target[0].detach().cpu().numpy()
+        arm_motion.start_inference_pose(
+            predicted_pose, current,
+            allocation_delta=inference_bridge.latest_action_delta,
+        )
+    arm_motion.update_inference()
 
 
 def _render_inference_hold(sim, articulation, controller, app):
@@ -3385,42 +3642,10 @@ def _render_inference_hold(sim, articulation, controller, app):
     app.update()
 
 
-def _write_catch_results(output_dir, results, args, completed, successful):
-    """Atomically write cumulative catch-success statistics."""
-    output_dir = Path(output_dir).expanduser().resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "catch_radius_m": float(args.catch_radius),
-        "episodes_completed": int(completed),
-        "episodes_successful": int(successful),
-        "success_rate": float(successful / completed) if completed else 0.0,
-        "episodes": results,
-    }
-    path = output_dir / "catch_results.json"
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(payload, indent=2) + "\n")
-    temporary.replace(path)
-    return path
-
-
-def _catch_center_from_link6_position(link6_position):
-    """Return the success-test center without moving the simulated Ring.
-
-    The dataset IK targets this point relative to link6.  Success evaluation
-    uses the same fixed world-axis offset, while the actual Ring body remains
-    untouched in the simulation.
-    """
-    offset = torch.as_tensor(
-        (0.0, 0.10, 0.025), dtype=link6_position.dtype,
-        device=link6_position.device,
-    )
-    return link6_position + offset
-
-
 def _run_loop(
     args, sim, articulation, arm_indices, steer_indices, drive_indices,
     arm_rad, tennis_ball, recorder, inference_bridge=None,
-    observation_video=None,
+    observation_video=None, inference_evaluator=None,
 ):
     """Main update loop; extension hooks (drive/capture/eval) belong here."""
     from omni.timeline import get_timeline_interface
@@ -3443,8 +3668,6 @@ def _run_loop(
     body_names = list(articulation.body_names)
     base_body_index = body_names.index("base_link") if "base_link" in body_names else 0
     link6_body_index = body_names.index("link6") if "link6" in body_names else None
-    if link6_body_index is None:
-        print("[WARN] link6 body not found; catch success will remain false.", flush=True)
     initial_base_body_pos = articulation.data.body_pos_w.torch[0, base_body_index].clone()
     initial_base_body_pose = articulation.data.body_pose_w.torch[
         0, base_body_index
@@ -3468,22 +3691,13 @@ def _run_loop(
     )
     episode = 0
     episode_step = 0
-    episode_success = False
-    episode_min_ring_distance = float("inf")
-    episode_catch_time = None
-    completed_episodes = 0
-    successful_episodes = 0
-    catch_results = []
-    catch_results_dir = Path(args.inference_input_dir).expanduser().resolve()
-    catch_results_path = _write_catch_results(
-        catch_results_dir, catch_results, args, completed_episodes, successful_episodes
-    )
-    print(f"[INFO] Catch results will be written to {catch_results_path}", flush=True)
     launch, landing, flight_steps = _reset_throw_episode(
         sim, articulation, controller, tennis_ball, args, throw_rng, episode,
         stage, marker_paths, arm_motion,
     )
     recorder.start_episode(episode, launch, landing, flight_steps)
+    if inference_evaluator is not None:
+        inference_evaluator.begin_episode(episode, landing)
     throw_period_steps = (
         max(1, int(round(args.throw_period / dt))) if args.throw_period > 0.0 else 0
     )
@@ -3499,7 +3713,9 @@ def _run_loop(
     step = 0
     while simulation_app.is_running():
         if inference_bridge is not None:
-            _update_inference_controller(inference_bridge, controller, episode)
+            _update_inference_controller(
+                inference_bridge, controller, arm_motion, episode
+            )
             keys = set()
         else:
             keys = set(args.scripted_keys.lower()) if args.scripted_keys else keyboard.poll()
@@ -3511,6 +3727,7 @@ def _run_loop(
         # prefix; automatic landing-share motion is gated by arm_motion.update.
         base_unlocked = (
             inference_bridge.control_ready
+            and not inference_bridge.awaiting_action
             if inference_bridge is not None
             else episode_step >= args.arm_start_step
         )
@@ -3578,19 +3795,6 @@ def _run_loop(
             articulation.write_data_to_sim()
             sim.forward()
             tennis_ball.update(dt)
-            if link6_body_index is not None and args.catch_radius > 0.0:
-                link6_pos = articulation.data.body_pos_w.torch[0, link6_body_index]
-                ring_pos = _catch_center_from_link6_position(link6_pos)
-                ball_pos = tennis_ball.data.root_pos_w.torch[0]
-                ring_distance = float(torch.linalg.norm(ball_pos - ring_pos).item())
-                episode_min_ring_distance = min(episode_min_ring_distance, ring_distance)
-                if not episode_success and ring_distance <= args.catch_radius:
-                    episode_success = True
-                    episode_catch_time = (episode_step + 1) * dt
-                    print(
-                        "[CATCH] Episode %d: ball entered ring radius, distance=%.3f m time=%.3f s"
-                        % (episode, ring_distance, episode_catch_time), flush=True,
-                    )
             if (arm_motion.ball_target_step is not None
                     and episode_step + 1 == arm_motion.ball_target_step):
                 ball_pos = tennis_ball.data.root_pos_w.torch[0].detach().cpu().numpy()
@@ -3620,8 +3824,12 @@ def _run_loop(
                 recorder.print_camera_extrinsics(episode, episode_step)
             if inference_bridge is not None:
                 inference_bridge.capture(
-                    episode, episode_step, articulation, arm_indices,
-                    base_body_index,
+                    episode, episode_step, articulation, link6_body_index,
+                )
+            if inference_evaluator is not None:
+                inference_evaluator.observe(
+                    episode, episode_step, articulation, base_body_index,
+                    link6_body_index, tennis_ball,
                 )
             if observation_video is not None and inference_bridge is not None:
                 saved_input = getattr(inference_bridge, "last_input_directory", None)
@@ -3662,51 +3870,18 @@ def _run_loop(
             if observation_video is not None:
                 observation_video.save_episode()
             recorder.save_episode()
-            completed_episodes += 1
-            successful_episodes += int(episode_success)
-            catch_results.append({
-                "episode": int(episode),
-                "success": bool(episode_success),
-                "min_ring_distance_m": (
-                    float(episode_min_ring_distance)
-                    if np.isfinite(episode_min_ring_distance) else None
-                ),
-                "catch_time_s": (
-                    float(episode_catch_time)
-                    if episode_catch_time is not None else None
-                ),
-                "duration_s": float(episode_step * dt),
-                "steps": int(episode_step),
-                "throw_position": [float(value) for value in launch],
-                "landing_position": [float(value) for value in landing],
-                "episodes_completed": int(completed_episodes),
-                "successes_so_far": int(successful_episodes),
-                "success_rate": float(successful_episodes / completed_episodes),
-            })
-            _write_catch_results(
-                catch_results_dir, catch_results, args,
-                completed_episodes, successful_episodes,
-            )
-            print(
-                "[INFO] Episode %d ended: success=%s min_ring_distance=%s "
-                "catch_time=%s; cumulative success rate=%.1f%%"
-                % (
-                    episode, episode_success,
-                    "%.3f m" % episode_min_ring_distance
-                    if np.isfinite(episode_min_ring_distance) else "N/A",
-                    "%.3f s" % episode_catch_time
-                    if episode_catch_time is not None else "N/A",
-                    100.0 * successful_episodes / completed_episodes,
-                ), flush=True,
-            )
-            if completed_episodes >= args.max_episodes:
-                print(
-                    f"[INFO] Reached --max-episodes={args.max_episodes}; exiting.",
-                    flush=True,
-                )
-                break
+            catch_record = None
+            if inference_evaluator is not None:
+                catch_record = inference_evaluator.finish_episode(episode)
+                if inference_evaluator.complete:
+                    print(
+                        "[INFO] Requested inference evaluation episode count reached.",
+                        flush=True,
+                    )
             if recorder.complete:
                 print("[INFO] Requested dataset episode count reached.", flush=True)
+                break
+            if inference_evaluator is not None and inference_evaluator.complete:
                 break
             episode += 1
             launch, landing, flight_steps = _reset_throw_episode(
@@ -3714,12 +3889,11 @@ def _run_loop(
                 stage, marker_paths, arm_motion,
             )
             recorder.start_episode(episode, launch, landing, flight_steps)
+            if inference_evaluator is not None:
+                inference_evaluator.begin_episode(episode, landing)
             if inference_bridge is not None:
                 inference_bridge.reset_episode()
             episode_step = 0
-            episode_success = False
-            episode_min_ring_distance = float("inf")
-            episode_catch_time = None
         else:
             episode_step += 1
         if args.max_steps > 0 and step >= args.max_steps:
@@ -3752,6 +3926,10 @@ def main():
         _VLAInferenceBridge(args_cli, camera_render_products)
         if args_cli.inference_control else None
     )
+    inference_evaluator = (
+        _InferenceCatchEvaluator(args_cli)
+        if args_cli.inference_control else None
+    )
     # AppLauncher disables this for ``--viz none`` and SimulationContext may
     # re-apply its rendering settings during construction.  Off-screen RTX
     # cameras still require dynamic PhysX poses to be copied into Fabric.
@@ -3767,11 +3945,13 @@ def main():
         _run_loop(
             args_cli, sim, articulation, arm_indices, steer_indices,
             drive_indices, arm_rad, tennis_ball,
-            recorder, inference_bridge, observation_video,
+            recorder, inference_bridge, observation_video, inference_evaluator,
         )
     finally:
         observation_video.close()
         recorder.finalize()
+        if inference_evaluator is not None:
+            inference_evaluator.finalize()
         if inference_bridge is not None:
             inference_bridge.close()
     # Keep Replicator items alive for the full simulation loop.

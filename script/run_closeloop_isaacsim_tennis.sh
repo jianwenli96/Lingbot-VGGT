@@ -17,7 +17,7 @@ ZMQ_OBSERVATION_PORT="${ZMQ_OBSERVATION_PORT:-5566}"
 ZMQ_ACTION_PORT="${ZMQ_ACTION_PORT:-5567}"
 SEED="${SEED:-0}"
 MAX_EPISODES="${MAX_EPISODES:-100}"
-INFERENCE_INPUT_DIR="${INFERENCE_INPUT_DIR:-/home/jdhc/lijianwen/Codes/Lingbot-VGGT/closeloop_outputs}"
+INFERENCE_OUTPUT_DIR="${INFERENCE_OUTPUT_DIR:-/home/jdhc/lijianwen/Codes/Lingbot-VGGT/closeloop_outputs}"
 
 if [[ ! -f "${ISAACSIM_SCRIPT}" ]]; then
     printf 'Isaac Sim entry point not found: %s\n' "${ISAACSIM_SCRIPT}" >&2
@@ -45,37 +45,40 @@ cd "${ISAACLAB_ROOT}"
 cmd=(
     "${ISAACLAB_ROOT}/isaaclab.sh"
     -p "${ISAACSIM_SCRIPT}"
-    --seed "${SEED}"
-    --max-episodes "${MAX_EPISODES}"
-    --enable_cameras
     --viz kit
-    --camera-width 480
-    --camera-height 360
-    --ball-distance 4.0
-    --ball-distance-range 0.5
-    --ball-height-range 0.81 1.0
-    --ball-flight-time-range 1.4 1.6
-    --ball-target-height 0.9
-    --ball-landing-radius 1.4
-    --ball-landing-forward-min 0.3
-    --catch-radius 0.13
-    --physics_dt 0.0333333
-    --throw-period 1.7
-    --observation-video-quality 9
-    --rendering_mode quality
-    --net-opacity 0
-    --inference-control
-    --inference-timeout 30
-    --zmq-host "${ZMQ_HOST}"
-    --zmq-observation-port "${ZMQ_OBSERVATION_PORT}"
-    --zmq-action-port "${ZMQ_ACTION_PORT}"
-    --hide-throw-markers
-    --inference-frame-offsets 0 2 4 6 8 10 12 14 16
-    --inference-once-per-episode
-    --inference-save-inputs
-    --inference-input-dir "${INFERENCE_INPUT_DIR}"
-    --dataset-task "Catch the green tennis ball"
-    --clean-close
+    --seed "${SEED}"
+    --camera-width 480 \
+    --camera-height 360 \
+    --ball-distance 4.0 \
+    --ball-distance-range 0.5 \
+    --ball-height-range 0.81 1.0 \
+    --ball-flight-time-range 1.4 1.6 \
+    --ball-target-height 0.9 \
+    --ball-landing-radius 1.4 \
+    --ball-landing-forward-min 0.3 \
+    --ball-landing-lateral-max 0.7 \
+    --physics_dt 0.0333333 \
+    --throw-period 1.7 \
+    --inference-control \
+    --inference-replan-steps 20 \
+    --inference-timeout 30 \
+    --zmq-host "${ZMQ_HOST}" \
+    --zmq-observation-port "${ZMQ_OBSERVATION_PORT}" \
+    --zmq-action-port "${ZMQ_ACTION_PORT}" \
+    --base-landing-share 0.8 \
+    --hide-throw-markers \
+    --inference-frame-offsets 0 2 4 6 8 10 12 14 16 \
+    --enable_cameras \
+    --inference-once-per-episode \
+    --inference-save-inputs \
+    --inference-input-dir "${INFERENCE_OUTPUT_DIR}" \
+    --observation-video-quality 9 \
+    --rendering_mode quality \
+    --net-opacity 0 \
+    --dataset-task "Catch the green tennis ball" \
+    --inference-eval-episodes "${MAX_EPISODES}" \
+    --inference-success-distance 0.15 \
+    --inference-eval-output-dir "${INFERENCE_OUTPUT_DIR}" \
 )
 
 exec "${cmd[@]}" "$@"
