@@ -279,7 +279,7 @@ class LatentLeRobotDataset(LeRobotDataset):
             right_action = get_relative_pose(action[:, 8:15])
             action = np.concatenate([left_action, action[:, 7:8], right_action, action[:, 15:16]], axis=1)
         elif self.config.env_type == 'tennis_tshape':
-            action = get_relative_pose_6d(action[:, -6:]).numpy()
+            action = get_relative_pose_6d(action[:, :6]).numpy()
         else:
             action = action
         return torch.from_numpy(action).float()

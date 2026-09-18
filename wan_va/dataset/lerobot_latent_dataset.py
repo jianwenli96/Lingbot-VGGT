@@ -344,7 +344,7 @@ class LatentLeRobotDataset(LeRobotDataset):
         elif self.config.env_type == 'aloha_tshape':
             action = action[..., :28]
         elif self.config.env_type == 'tennis_tshape':
-            action = get_relative_pose_6d(action[:, -6:])
+            action = get_relative_pose_6d(action[:, :6])
         action = np.pad(action, pad_width=((frame_stride * 4, 0), (0, 0)), mode='constant', constant_values=0)
 
         latent_frame_num = (len(latent_frame_ids) - 1) // 4 + 1

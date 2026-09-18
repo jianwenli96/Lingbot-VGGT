@@ -138,8 +138,8 @@ def tennis_action_metrics(predicted, gt_absolute, base_absolute):
     """
     from scipy.spatial.transform import Rotation
     predicted = np.asarray(predicted, dtype=np.float64)
-    gt = np.asarray(gt_absolute, dtype=np.float64)[..., -6:]
-    base = np.asarray(base_absolute, dtype=np.float64)[-6:]
+    gt = np.asarray(gt_absolute, dtype=np.float64)[..., :6]
+    base = np.asarray(base_absolute, dtype=np.float64)[:6]
     if predicted.ndim != 2 or predicted.shape != gt.shape or predicted.shape[1] != 6:
         raise ValueError(f"Expected matched [T,6] poses, got {predicted.shape}, {gt.shape}")
     if len(predicted) == 0 or not all(np.isfinite(x).all() for x in (predicted, gt, base)):
@@ -175,7 +175,7 @@ def tennis_pose(actions):
     values = np.asarray(actions, dtype=np.float64)
     if values.ndim < 1 or values.shape[-1] < 6:
         raise ValueError(f"Expected at least six tennis pose channels, got {values.shape}")
-    pose = values[..., -6:]
+    pose = values[..., :6]
     if not np.isfinite(pose).all():
         raise ValueError("Tennis pose contains NaN or Inf")
     return pose
